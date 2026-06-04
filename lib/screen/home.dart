@@ -1,144 +1,14 @@
-import 'dart:math';
-
 import 'package:custom_sliding_segmented_control/custom_sliding_segmented_control.dart';
-import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/svg.dart';
 import 'package:mytransferapp/common/my_color.dart';
 import 'package:mytransferapp/common/my_constant.dart';
+import 'package:mytransferapp/common/my_extension.dart';
+import 'package:mytransferapp/component/skeleton.dart';
+import 'package:mytransferapp/dao/home_dao.dart';
+import 'package:mytransferapp/enum/home_enum.dart';
 import 'package:photo_manager/photo_manager.dart';
 import 'package:photo_manager_image_provider/photo_manager_image_provider.dart';
-
-enum SendFileType { file, folder, text }
-
-class SendFileData {
-  final int uid;
-  final String path;
-  final SendFileType type;
-
-  SendFileData({required this.uid, required this.path, required this.type});
-}
-
-class HomeDAO {
-  final ValueNotifier<int> vIndexTabGallery;
-  final ValueNotifier<int> vIndexFileTypeFilter;
-  final ValueNotifier<List<SendFileData>> vListSelectedFile;
-
-  // Photo Manager (chỉ data, KHÔNG có ScrollController)
-  final ValueNotifier<List<AssetEntity>> vPhotoAssets;
-  final ValueNotifier<bool> vIsLoadingMore;
-  bool _hasMorePhotos = true;
-  int _currentPage = 0;
-  static const int _pageSize = 30;
-  AssetPathEntity? _albumPath;
-
-  HomeDAO({
-    required this.vIndexTabGallery,
-    required this.vIndexFileTypeFilter,
-    required this.vListSelectedFile,
-    required this.vPhotoAssets,
-    required this.vIsLoadingMore,
-  });
-
-  factory HomeDAO.init() {
-    return HomeDAO(
-      vIndexTabGallery: ValueNotifier(0),
-      vIndexFileTypeFilter: ValueNotifier(-1),
-      vListSelectedFile: ValueNotifier([]),
-      vPhotoAssets: ValueNotifier([]),
-      vIsLoadingMore: ValueNotifier(false),
-    );
-  }
-
-  Future<void> loadInitialPhotos() async {
-    final result = await PhotoManager.requestPermissionExtend();
-    if (!result.isAuth) return; // không mở setting tự động, để UI xử lý
-    final albums = await PhotoManager.getAssetPathList(
-      type: RequestType.image,
-      onlyAll: true,
-    );
-    if (albums.isEmpty) return;
-    _albumPath = albums.first;
-    _currentPage = 0;
-    _hasMorePhotos = true;
-    vPhotoAssets.value = [];
-    await loadMorePhotos();
-  }
-
-  Future<void> loadMorePhotos() async {
-    if (!_hasMorePhotos || vIsLoadingMore.value || _albumPath == null) return;
-    vIsLoadingMore.value = true;
-    final start = _currentPage * _pageSize;
-    final end = start + _pageSize;
-    final assets = await _albumPath!.getAssetListRange(start: start, end: end);
-    if (assets.length < _pageSize) _hasMorePhotos = false;
-    _currentPage++;
-    vPhotoAssets.value = [...vPhotoAssets.value, ...assets];
-    vIsLoadingMore.value = false;
-  }
-
-  void onChangeIndexTabGallery(int idx) {
-    if (vIndexTabGallery.value == idx) return;
-    vIndexTabGallery.value = idx;
-  }
-
-  void onChangeIndexFileTypeFilter(int idx) {
-    if (vIndexFileTypeFilter.value == idx) return;
-    vIndexFileTypeFilter.value = idx;
-  }
-
-  bool isSelected(AssetEntity asset) =>
-      vListSelectedFile.value.any((e) => e.uid.toString() == asset.id);
-
-  void onTogglePhoto(AssetEntity asset) {
-    if (isSelected(asset)) {
-      vListSelectedFile.value = vListSelectedFile.value
-          .where((e) => e.uid.toString() != asset.id)
-          .toList();
-    } else {
-      vListSelectedFile.value = [
-        ...vListSelectedFile.value,
-        SendFileData(
-          uid: int.tryParse(asset.id) ?? asset.hashCode,
-          path: asset.id,
-          type: SendFileType.file,
-        ),
-      ];
-    }
-  }
-
-  void onRemoveSelectedFile(int uid) {
-    vListSelectedFile.value = vListSelectedFile.value
-        .where((e) => e.uid != uid)
-        .toList();
-  }
-
-  void onRemoveAllSelectedFile(int idx) {
-    vListSelectedFile.value = [];
-  }
-
-  void onAddSelectedFile(String path, SendFileType type) {
-    vListSelectedFile.value = [
-      ...vListSelectedFile.value,
-      SendFileData(
-        uid: DateTime.now().millisecondsSinceEpoch,
-        path: path,
-        type: type,
-      ),
-    ];
-  }
-
-  void dispose() {
-    vPhotoAssets.dispose();
-    vIsLoadingMore.dispose();
-    vIndexTabGallery.dispose();
-    vIndexFileTypeFilter.dispose();
-    vListSelectedFile.dispose();
-  }
-}
-
-// ── Permission state ───────────────────────────────────────────────────
-enum _PhotoPermission { checking, granted, denied, limited }
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -149,9 +19,7 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final HomeDAO _data = HomeDAO.init();
   final ScrollController _photoScrollController = ScrollController();
-
-  // Trạng thái quyền riêng, không vào DAO
-  _PhotoPermission _permission = _PhotoPermission.checking;
+  PhotoPermission _permission = PhotoPermission.checking;
 
   @override
   void initState() {
@@ -166,27 +34,26 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     });
   }
 
-  // Khi user quay lại app sau khi cấp quyền trong Settings → load lại
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed &&
-        _permission == _PhotoPermission.denied) {
+        _permission == PhotoPermission.denied) {
       _checkAndLoad();
     }
   }
 
   Future<void> _checkAndLoad() async {
-    setState(() => _permission = _PhotoPermission.checking);
+    setState(() => _permission = PhotoPermission.checking);
     final result = await PhotoManager.requestPermissionExtend();
     if (!mounted) return;
     if (result.isAuth) {
-      setState(() => _permission = _PhotoPermission.granted);
+      setState(() => _permission = PhotoPermission.granted);
       await _data.loadInitialPhotos();
     } else if (result == PermissionState.limited) {
-      setState(() => _permission = _PhotoPermission.limited);
+      setState(() => _permission = PhotoPermission.limited);
       await _data.loadInitialPhotos();
     } else {
-      setState(() => _permission = _PhotoPermission.denied);
+      setState(() => _permission = PhotoPermission.denied);
     }
   }
 
@@ -218,37 +85,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               _buildFilterChips(),
             ],
           ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildQuickActionCard({
-    required IconData icon,
-    required String label,
-    required MaterialColor color,
-  }) {
-    return Expanded(
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 16),
-        decoration: BoxDecoration(
-          color: color.shade50,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: color.shade100),
-        ),
-        child: Column(
-          children: [
-            Icon(icon, size: 32, color: color.shade700),
-            const SizedBox(height: 8),
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w600,
-                color: color.shade700,
-              ),
-            ),
-          ],
         ),
       ),
     );
@@ -331,81 +167,209 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Widget _buildDeviceInfor() {
-    return Container(
-      width: 370,
-      height: 118,
-      decoration: BoxDecoration(
-        color: black005,
-        borderRadius: BorderRadius.circular(40),
-      ),
-      padding: const EdgeInsets.all(5),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Text(
-            "Device Info",
-            style: TextStyle(
-              fontSize: 20,
-              fontWeight: FontWeight.w600,
-              color: black,
-            ),
-          ),
-          const SizedBox(width: 10),
-          SvgPicture.asset("${PATH_ICON}ic_edit.svg", height: 24, width: 24),
-        ],
-      ),
+    return ValueListenableBuilder(
+      valueListenable: _data.vListSelectedFile,
+      builder: (_, value, __) {
+        return DeviceInfor(
+          listSelectedFile: value,
+          onRemove: _data.onRemoveSelectedFile,
+          onCancel: _data.onCancel,
+          onSend: _data.onSend,
+        );
+      },
     );
   }
 
   Widget _buildPickerBar() {
     return Expanded(
-      child: Container(
-        decoration: BoxDecoration(
-          color: black005,
-          borderRadius: BorderRadius.circular(40),
-        ),
-        child: Column(
-          children: [
-            const SizedBox(height: 12),
-            Container(
-              width: 300,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(999),
-              ),
-              child: Center(
-                child: ValueListenableBuilder(
-                  valueListenable: _data.vIndexTabGallery,
-                  builder: (context, value, child) {
-                    return ClipRRect(
-                      borderRadius: BorderRadius.circular(999),
-                      child: CustomSlidingSegmentedControl<int>(
-                        children: {
-                          0: _buildTabItem('Photos'),
-                          1: _buildTabItem('Collections'),
-                        },
-                        clipBehavior: Clip.hardEdge,
-                        onValueChanged: (int? idx) {
-                          _data.onChangeIndexTabGallery(idx!);
-                        },
-                        padding: 5,
-                        thumbDecoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: BorderRadius.circular(
-                            20,
-                          ), // Rounded corners
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(40),
+        child: Container(
+          decoration: BoxDecoration(color: black005),
+          child: Column(
+            children: [
+              const SizedBox(height: 12),
+              Container(
+                width: 300,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                child: Center(
+                  child: ValueListenableBuilder(
+                    valueListenable: _data.vIndexTabGallery,
+                    builder: (context, value, child) {
+                      return ClipRRect(
+                        borderRadius: BorderRadius.circular(999),
+                        child: CustomSlidingSegmentedControl<int>(
+                          children: {
+                            0: _buildTabItem('Photos'),
+                            1: _buildTabItem('Collections'),
+                          },
+                          clipBehavior: Clip.hardEdge,
+                          onValueChanged: (int? idx) {
+                            _data.onChangeIndexTabGallery(idx!);
+                          },
+                          padding: 5,
+                          thumbDecoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(20),
+                          ),
+                          decoration: BoxDecoration(
+                            color: black005,
+                            borderRadius: BorderRadius.circular(999),
+                          ),
                         ),
-                        decoration: BoxDecoration(
-                          color: black005,
-                          borderRadius: BorderRadius.circular(999),
-                        ),
-                      ),
-                    );
-                  },
+                      );
+                    },
+                  ),
                 ),
               ),
+              const SizedBox(height: 8),
+              // ── Sort + Filter row ────────────────────────────────────
+              _buildSortFilterRow(),
+              const SizedBox(height: 8),
+              _buildGridview(),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ── Sort + Filter ──────────────────────────────────────────────────
+  Widget _buildSortFilterRow() {
+    return SizedBox(
+      height: 34,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        children: [
+          // Sort chips
+          ValueListenableBuilder<PhotoSortType>(
+            valueListenable: _data.vSortType,
+            builder: (_, sortType, __) => Row(
+              children: [
+                _buildSortChip(
+                  label: 'Gần đây',
+                  icon: Icons.access_time_rounded,
+                  isActive: sortType == PhotoSortType.recent,
+                  onTap: () => _data.onChangeSortType(PhotoSortType.recent),
+                ),
+                const SizedBox(width: 8),
+                _buildSortChip(
+                  label: 'Lớn nhất',
+                  icon: Icons.arrow_downward_rounded,
+                  isActive: sortType == PhotoSortType.largest,
+                  onTap: () => _data.onChangeSortType(PhotoSortType.largest),
+                ),
+              ],
             ),
-            const SizedBox(height: 12),
-            _buildGridview(),
+          ),
+          const SizedBox(width: 8),
+          // Divider
+          Container(
+            width: 1,
+            height: 24,
+            margin: const EdgeInsets.symmetric(vertical: 5),
+            color: Colors.grey.shade300,
+          ),
+          const SizedBox(width: 8),
+          // Filter type chips
+          ValueListenableBuilder<PhotoFilterType>(
+            valueListenable: _data.vFilterType,
+            builder: (_, filterType, __) => Row(
+              children: PhotoFilterType.values.map((f) {
+                return Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: _buildFilterChip(
+                    label: f.label,
+                    icon: f.icon,
+                    isActive: filterType == f,
+                    onTap: () => _data.onChangeFilterType(f),
+                  ),
+                );
+              }).toList(),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSortChip({
+    required String label,
+    required IconData icon,
+    required bool isActive,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color: isActive ? black : Colors.white,
+          borderRadius: BorderRadius.circular(999),
+          border: Border.all(color: isActive ? black : Colors.grey.shade300),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              icon,
+              size: 13,
+              color: isActive ? Colors.white : Colors.grey.shade600,
+            ),
+            const SizedBox(width: 4),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+                color: isActive ? Colors.white : Colors.grey.shade700,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildFilterChip({
+    required String label,
+    required IconData icon,
+    required bool isActive,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color: isActive ? Colors.blue.shade600 : Colors.white,
+          borderRadius: BorderRadius.circular(999),
+          border: Border.all(
+            color: isActive ? Colors.blue.shade600 : Colors.grey.shade300,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              icon,
+              size: 13,
+              color: isActive ? Colors.white : Colors.grey.shade600,
+            ),
+            const SizedBox(width: 4),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+                color: isActive ? Colors.white : Colors.grey.shade700,
+              ),
+            ),
           ],
         ),
       ),
@@ -427,15 +391,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
   }
 
-  // ── GridView với đủ 3 trạng thái: checking / denied / loaded ─────────
   Widget _buildGridview() {
-    // 1. Đang kiểm tra quyền → skeleton shimmer
-    if (_permission == _PhotoPermission.checking) {
+    if (_permission == PhotoPermission.checking) {
       return Expanded(child: _buildSkeletonGrid());
     }
 
-    // 2. Bị từ chối → nút yêu cầu quyền
-    if (_permission == _PhotoPermission.denied) {
+    if (_permission == PhotoPermission.denied) {
       return Expanded(
         child: Center(
           child: Column(
@@ -454,7 +415,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               const SizedBox(height: 16),
               GestureDetector(
                 onTap: () async {
-                  // Thử xin lại; nếu vĩnh viễn từ chối → mở Settings
                   final result = await PhotoManager.requestPermissionExtend();
                   if (result.isAuth || result == PermissionState.limited) {
                     _checkAndLoad();
@@ -487,12 +447,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       );
     }
 
-    // 3. Đã có quyền → hiển thị ảnh (chờ load xong mới show grid)
     return Expanded(
       child: ValueListenableBuilder<List<AssetEntity>>(
         valueListenable: _data.vPhotoAssets,
         builder: (context, assets, _) {
-          // Đang load lần đầu (chưa có ảnh nào) → skeleton
           if (assets.isEmpty) {
             return ValueListenableBuilder<bool>(
               valueListenable: _data.vIsLoadingMore,
@@ -501,7 +459,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             );
           }
 
-          // Đã có ảnh → hiển thị grid
           return ValueListenableBuilder<List<SendFileData>>(
             valueListenable: _data.vListSelectedFile,
             builder: (context, selectedFiles, _) {
@@ -551,88 +508,73 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
   }
 
-  // Skeleton shimmer khi đang load
   Widget _buildSkeletonGrid() {
     return GridView.builder(
-      scrollDirection: Axis.horizontal,
+      scrollDirection: Axis.vertical,
       padding: const EdgeInsets.all(12),
       physics: const NeverScrollableScrollPhysics(),
       gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 2,
+        crossAxisCount: 3,
         mainAxisSpacing: 8,
         crossAxisSpacing: 8,
         childAspectRatio: 1,
       ),
-      itemCount: 10,
-      itemBuilder: (_, __) => _SkeletonItem(),
+      itemCount: 12,
+      itemBuilder: (_, __) => SkeletonItem(),
     );
   }
 
   Widget _buildFilterChips() {
-    return Row(
+    return Flex(
+      direction: Axis.horizontal,
       children: [
         _buildQuickActionCard(
-          icon: Icons.insert_drive_file,
-          label: 'File',
-          color: Colors.blue,
+          avatar: "ic_file.svg",
+          label: "File",
+          color: black005,
         ),
         const SizedBox(width: 12),
         _buildQuickActionCard(
-          icon: Icons.folder,
-          label: 'Folder',
-          color: Colors.orange,
+          avatar: "ic_gallery.svg",
+          label: "Folder",
+          color: black005,
         ),
         const SizedBox(width: 12),
         _buildQuickActionCard(
-          icon: Icons.description,
-          label: 'Text',
-          color: Colors.purple,
+          avatar: "ic_paragraph.svg",
+          label: "Text",
+          color: black005,
         ),
       ],
     );
   }
-}
 
-// ── Skeleton item ──────────────────────────────────────────────────────
-class _SkeletonItem extends StatefulWidget {
-  @override
-  State<_SkeletonItem> createState() => _SkeletonItemState();
-}
-
-class _SkeletonItemState extends State<_SkeletonItem>
-    with SingleTickerProviderStateMixin {
-  late AnimationController _ctrl;
-  late Animation<double> _anim;
-
-  @override
-  void initState() {
-    super.initState();
-    _ctrl = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 900),
-    )..repeat(reverse: true);
-    _anim = Tween<double>(begin: 0.4, end: 1.0).animate(_ctrl);
-  }
-
-  @override
-  void dispose() {
-    _ctrl.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return FadeTransition(
-      opacity: _anim,
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(12),
-        child: Container(color: Colors.grey.shade300),
+  Widget _buildQuickActionCard({
+    required String avatar,
+    required String label,
+    required Color color,
+  }) {
+    return Flexible(
+      flex: 1,
+      child: Container(
+        padding: EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        decoration: BoxDecoration(
+          color: color,
+          borderRadius: BorderRadius.circular(999),
+        ),
+        child: Row(
+          // mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            SvgPicture.asset("$PATH_ICON$avatar", height: 24, width: 24),
+            SizedBox(width: 10),
+            Text(label),
+          ],
+        ),
       ),
     );
   }
 }
 
-// ── Photo grid item ────────────────────────────────────────────────────
 class _PhotoGridItem extends StatelessWidget {
   final AssetEntity asset;
   final bool isSelected;
@@ -653,6 +595,7 @@ class _PhotoGridItem extends StatelessWidget {
         child: Stack(
           fit: StackFit.expand,
           children: [
+            // Thumbnail
             AssetEntityImage(
               asset,
               isOriginal: false,
@@ -688,7 +631,9 @@ class _PhotoGridItem extends StatelessWidget {
               ),
             ),
 
-            // Video duration badge
+            // Positioned(top: 5, left: 5, child: _buildTypeLabel(asset)),
+
+            // Video duration badge (góc dưới phải)
             if (asset.type == AssetType.video)
               Positioned(
                 bottom: 5,
@@ -699,11 +644,11 @@ class _PhotoGridItem extends StatelessWidget {
                     vertical: 2,
                   ),
                   decoration: BoxDecoration(
-                    color: Colors.black.withOpacity(0.6),
+                    color: Colors.black.withAlpha(60),
                     borderRadius: BorderRadius.circular(4),
                   ),
                   child: Text(
-                    _formatDuration(asset.videoDuration),
+                    formatDuration(asset.videoDuration),
                     style: const TextStyle(color: Colors.white, fontSize: 10),
                   ),
                 ),
@@ -714,9 +659,431 @@ class _PhotoGridItem extends StatelessWidget {
     );
   }
 
-  String _formatDuration(Duration d) {
-    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
-    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
-    return '$m:$s';
+  // Widget _buildTypeLabel(AssetEntity asset) {
+  //   final config = _typeLabelConfig(asset);
+  //   if (config == null) return const SizedBox.shrink();
+  //   return Container(
+  //     padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+  //     decoration: BoxDecoration(
+  //       color: config.$2.withOpacity(0.85),
+  //       borderRadius: BorderRadius.circular(4),
+  //     ),
+  //     child: Row(
+  //       mainAxisSize: MainAxisSize.min,
+  //       children: [
+  //         Icon(config.$1, size: 10, color: Colors.white),
+  //         const SizedBox(width: 3),
+  //         Text(
+  //           config.$3,
+  //           style: const TextStyle(
+  //             color: Colors.white,
+  //             fontSize: 9,
+  //             fontWeight: FontWeight.w600,
+  //           ),
+  //         ),
+  //       ],
+  //     ),
+  //   );
+  // }
+  // // Returns (icon, color, label) cho từng loại asset
+  // (IconData, Color, String)? _typeLabelConfig(AssetEntity asset) {
+  //   switch (asset.type) {
+  //     case AssetType.image:
+  //       // Chỉ hiện label nếu không phải ảnh thường (GIF, etc.)
+  //       final ext = (asset.title ?? '').split('.').last.toLowerCase();
+  //       if (ext == 'gif') {
+  //         return (Icons.gif_box_outlined, Colors.purple, 'GIF');
+  //       }
+  //       return null; // ảnh thường không cần label
+  //     case AssetType.video:
+  //       return (Icons.videocam_rounded, Colors.red.shade700, 'VIDEO');
+  //     case AssetType.audio:
+  //       return (Icons.audiotrack_rounded, Colors.orange.shade700, 'AUDIO');
+  //     case AssetType.other:
+  //       return (Icons.insert_drive_file_outlined, Colors.grey.shade700, 'FILE');
+  //   }
+  // }
+}
+
+class DeviceInfor extends StatefulWidget {
+  final List<SendFileData> listSelectedFile;
+  final void Function(int id) onRemove;
+  final VoidCallback? onCancel;
+  final VoidCallback? onSend;
+
+  const DeviceInfor({
+    super.key,
+    required this.listSelectedFile,
+    required this.onRemove,
+    this.onCancel,
+    this.onSend,
+  });
+
+  @override
+  State<DeviceInfor> createState() => _DeviceInforState();
+}
+
+class _DeviceInforState extends State<DeviceInfor>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _animationController;
+  late Animation<double> _heightAnimation;
+  late Animation<double> _fadeAnimation;
+  late Animation<double> _headerPaddingAnimation;
+  late Animation<double> _headerFontSizeAnimation;
+  late Animation<double> _iconOpacityAnimation;
+
+  static const double _collapsedHeight = 118; // Khi không có file
+  static const double _expandedHeight = 280; // Khi có file (mở rộng)
+  static const double _headerHeight = 61; // Chiều cao header khi có file
+
+  @override
+  void initState() {
+    super.initState();
+    _animationController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 300),
+    );
+
+    // Animation chiều cao tổng thể
+    _heightAnimation =
+        Tween<double>(begin: _collapsedHeight, end: _expandedHeight).animate(
+          CurvedAnimation(
+            parent: _animationController,
+            curve: Curves.easeInOut,
+          ),
+        );
+
+    // Animation fade cho nội dung bên dưới
+    _fadeAnimation = Tween<double>(begin: 0, end: 1).animate(
+      CurvedAnimation(
+        parent: _animationController,
+        curve: const Interval(0.2, 0.6, curve: Curves.easeIn),
+      ),
+    );
+
+    // Animation cho padding của header (thu nhỏ khi có file)
+    _headerPaddingAnimation = Tween<double>(begin: 27, end: 8).animate(
+      CurvedAnimation(parent: _animationController, curve: Curves.easeInOut),
+    );
+
+    // Animation cho font size của header
+    _headerFontSizeAnimation = Tween<double>(begin: 20, end: 16).animate(
+      CurvedAnimation(parent: _animationController, curve: Curves.easeInOut),
+    );
+
+    // Animation cho opacity của icon edit (biến mất khi có file)
+    _iconOpacityAnimation = Tween<double>(begin: 1, end: 0).animate(
+      CurvedAnimation(parent: _animationController, curve: Curves.easeInOut),
+    );
+
+    // Mở rộng nếu có file
+    if (widget.listSelectedFile.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _animationController.forward();
+      });
+    }
+  }
+
+  @override
+  void didUpdateWidget(DeviceInfor oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Xử lý animation khi danh sách thay đổi
+    if (widget.listSelectedFile.isNotEmpty &&
+        !_animationController.isAnimating) {
+      if (_animationController.status != AnimationStatus.forward) {
+        _animationController.forward();
+      }
+    } else if (widget.listSelectedFile.isEmpty &&
+        !_animationController.isAnimating) {
+      if (_animationController.status != AnimationStatus.reverse) {
+        _animationController.reverse();
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _animationController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _animationController,
+      builder: (context, child) {
+        return Container(
+          width: 370,
+          height: _heightAnimation.value,
+          decoration: BoxDecoration(
+            color: black005,
+            borderRadius: BorderRadius.circular(40),
+          ),
+          padding: EdgeInsets.all(_headerPaddingAnimation.value),
+          child: Column(
+            children: [
+              // Header Row - thay đổi animation
+              Container(
+                height: _headerHeight,
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(
+                      "Device Info",
+                      style: TextStyle(
+                        fontSize: _headerFontSizeAnimation.value,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.black,
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Opacity(
+                      opacity: _iconOpacityAnimation.value,
+                      child: SvgPicture.asset(
+                        "${PATH_ICON}ic_edit.svg",
+                        height: 24,
+                        width: 24,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+              // File List Section (chỉ hiển thị khi có file)
+              if (widget.listSelectedFile.isNotEmpty)
+                FadeTransition(
+                  opacity: _fadeAnimation,
+                  child: Column(
+                    children: [
+                      const SizedBox(height: 16),
+
+                      // Horizontal File List
+                      SizedBox(
+                        height: 80,
+                        child: ListView.separated(
+                          scrollDirection: Axis.horizontal,
+                          itemCount: widget.listSelectedFile.length,
+                          separatorBuilder: (context, index) =>
+                              const SizedBox(width: 12),
+                          itemBuilder: (context, index) {
+                            final file = widget.listSelectedFile[index];
+                            return _buildFileItem(file);
+                          },
+                        ),
+                      ),
+
+                      const SizedBox(height: 16),
+
+                      // Action Buttons
+                      FadeTransition(
+                        opacity: _fadeAnimation,
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: _buildActionButton(
+                                label: "Cancel",
+                                icon: Icons.close,
+                                color: Colors.grey,
+                                onPressed: widget.onCancel,
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: _buildActionButton(
+                                label: "Send",
+                                icon: Icons.send,
+                                color: Colors.blue,
+                                onPressed: widget.onSend,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildFileItem(SendFileData file) {
+    return Container(
+      width: 70,
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [
+          BoxShadow(color: black005, blurRadius: 4, offset: const Offset(0, 2)),
+        ],
+      ),
+      child: Stack(
+        children: [
+          Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              // File Icon
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: _getFileColor(file).withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Icon(
+                  _getFileIcon(file),
+                  color: _getFileColor(file),
+                  size: 24,
+                ),
+              ),
+              const SizedBox(height: 4),
+              // File Name
+              Text(
+                _getFileName(file.path),
+                style: const TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w500,
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              // File Size
+              // Text(
+              //   _formatFileSize(file.),
+              //   style: TextStyle(fontSize: 8, color: Colors.grey.shade500),
+              // ),
+            ],
+          ),
+          // Remove Button
+          Positioned(
+            right: 4,
+            top: 4,
+            child: GestureDetector(
+              onTap: () => widget.onRemove(file.uid),
+              child: Container(
+                padding: const EdgeInsets.all(2),
+                decoration: const BoxDecoration(
+                  color: Colors.red,
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(Icons.close, size: 12, color: Colors.white),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildActionButton({
+    required String label,
+    required IconData icon,
+    required Color color,
+    VoidCallback? onPressed,
+  }) {
+    return GestureDetector(
+      onTap: onPressed,
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 10),
+        decoration: BoxDecoration(
+          color: color,
+          borderRadius: BorderRadius.circular(30),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, color: Colors.white, size: 18),
+            const SizedBox(width: 8),
+            Text(
+              label,
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.w600,
+                fontSize: 14,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  IconData _getFileIcon(SendFileData file) {
+    final extension = file.path.split('.').last.toLowerCase();
+    switch (extension) {
+      case 'jpg':
+      case 'jpeg':
+      case 'png':
+      case 'gif':
+      case 'heic':
+        return Icons.image;
+      case 'mp4':
+      case 'mov':
+      case 'avi':
+      case 'mkv':
+        return Icons.video_library;
+      case 'pdf':
+        return Icons.picture_as_pdf;
+      case 'doc':
+      case 'docx':
+        return Icons.description;
+      case 'xls':
+      case 'xlsx':
+        return Icons.table_chart;
+      case 'ppt':
+      case 'pptx':
+        return Icons.slideshow;
+      case 'zip':
+      case 'rar':
+      case '7z':
+        return Icons.folder_zip;
+      default:
+        return Icons.insert_drive_file;
+    }
+  }
+
+  Color _getFileColor(SendFileData file) {
+    final extension = file.path.split('.').last.toLowerCase();
+    switch (extension) {
+      case 'jpg':
+      case 'jpeg':
+      case 'png':
+      case 'gif':
+        return Colors.blue;
+      case 'mp4':
+      case 'mov':
+        return Colors.purple;
+      case 'pdf':
+        return Colors.red;
+      case 'doc':
+      case 'docx':
+        return Colors.blue.shade700;
+      case 'zip':
+      case 'rar':
+        return Colors.orange;
+      default:
+        return Colors.grey;
+    }
+  }
+
+  String _getFileName(String path) {
+    final name = path.split('/').last;
+    if (name.length > 12) {
+      return '${name.substring(0, 10)}...';
+    }
+    return name;
+  }
+
+  String _formatFileSize(int? bytes) {
+    if (bytes == null || bytes == 0) return '0 B';
+    const suffixes = ['B', 'KB', 'MB', 'GB'];
+    var i = 0;
+    var size = bytes.toDouble();
+    while (size >= 1024 && i < suffixes.length - 1) {
+      size /= 1024;
+      i++;
+    }
+    return '${size.toStringAsFixed(1)} ${suffixes[i]}';
   }
 }
