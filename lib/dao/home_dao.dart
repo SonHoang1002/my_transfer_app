@@ -1,6 +1,7 @@
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
-import 'package:mytransferapp/common/my_extension.dart';
+import 'package:mytransferapp/core/my_extension.dart';
+import 'package:mytransferapp/src/presentation/component/w_find_and_send_sheet.dart';
 import 'package:mytransferapp/enum/home_enum.dart';
 import 'package:photo_manager/photo_manager.dart';
 
@@ -12,7 +13,7 @@ class SendFileData {
   SendFileData({required this.uid, required this.path, required this.type});
 }
 
-class HomeDAO {
+class MyDAO {
   final ValueNotifier<int> vIndexTabGallery;
   final ValueNotifier<int> vIndexFileTypeFilter;
   final ValueNotifier<List<SendFileData>> vListSelectedFile;
@@ -30,7 +31,7 @@ class HomeDAO {
   static const int _pageSize = 30;
   AssetPathEntity? _albumPath;
 
-  HomeDAO({
+  MyDAO({
     required this.vIndexTabGallery,
     required this.vIndexFileTypeFilter,
     required this.vListSelectedFile,
@@ -40,8 +41,8 @@ class HomeDAO {
     required this.vFilterType,
   });
 
-  factory HomeDAO.init() {
-    return HomeDAO(
+  factory MyDAO.init() {
+    return MyDAO(
       vIndexTabGallery: ValueNotifier(0),
       vIndexFileTypeFilter: ValueNotifier(-1),
       vListSelectedFile: ValueNotifier([]),
@@ -52,9 +53,14 @@ class HomeDAO {
     );
   }
 
-  void onCancel() {}
-
-  void onSend() {}
+  void onSend(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      builder: (context) {
+        return WFindAndSendSheet(myDAO: this,);
+      },
+    );
+  }
 
   Future<void> loadInitialPhotos() async {
     final result = await PhotoManager.requestPermissionExtend();

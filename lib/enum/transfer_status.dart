@@ -1,0 +1,1 @@
+enum TransferStatus { idle, connecting, transferring, success, failed }

@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:mytransferapp/common/my_color.dart';
+import 'package:mytransferapp/core/my_color.dart';
 
 
 class MyThemes {

@@ -2,7 +2,7 @@ import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:flutter_portal/flutter_portal.dart';
-import 'package:mytransferapp/common/my_theme.dart';
+import 'package:mytransferapp/core/my_theme.dart';
 import 'package:mytransferapp/my_routes.dart';
 
 class MyApp extends StatefulWidget {

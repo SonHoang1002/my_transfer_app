@@ -5,6 +5,8 @@ const transparent = Color.fromRGBO(0, 0, 0, 0);
 const grey = Colors.grey;
 const red = Colors.red;
 const blue = Colors.blue;
+const purple = Colors.purple;
+const orange = Colors.orange;
 const green = Colors.green;
 const pink = Colors.pink;
 

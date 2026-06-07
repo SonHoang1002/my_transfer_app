@@ -1,11 +1,13 @@
 import 'package:flutter/material.dart';
 
-class SkeletonItem extends StatefulWidget {
+class WSkeleton extends StatefulWidget {
+  const WSkeleton({super.key});
+
   @override
-  State<SkeletonItem> createState() => SkeletonItemState();
+  State<WSkeleton> createState() => WSkeletonItemS();
 }
 
-class SkeletonItemState extends State<SkeletonItem>
+class WSkeletonItemS extends State<WSkeleton>
     with SingleTickerProviderStateMixin {
   late AnimationController _ctrl;
   late Animation<double> _anim;

@@ -1,0 +1,1 @@
+enum BluetoothBondStatus { none, bonding, bonded }
