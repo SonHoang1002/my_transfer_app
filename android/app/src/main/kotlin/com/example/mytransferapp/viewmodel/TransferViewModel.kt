@@ -126,9 +126,9 @@ object TransferEngine {
                     try {
                         socket.receive(packet)
                         val message = String(packet.data, 0, packet.length).trim()
-                        if (message.startsWith("SWIFTSHARE_PING:")) {
+                        if (message.startsWith("SUPERTRANSFER_PING:")) {
                             // Client discovered us! Respond back directly
-                            val replyMsg = "SWIFTSHARE_PONG:$deviceName:$TCP_TRANSFER_PORT"
+                            val replyMsg = "SUPERTRANSFER_PONG:$deviceName:$TCP_TRANSFER_PORT"
                             val replyBytes = replyMsg.toByteArray()
                             val replyPacket = DatagramPacket(
                                 replyBytes,
@@ -181,7 +181,7 @@ object TransferEngine {
                         try {
                             socket.receive(packet)
                             val message = String(packet.data, 0, packet.length).trim()
-                            if (message.startsWith("SWIFTSHARE_PONG:")) {
+                            if (message.startsWith("SUPERTRANSFER_PONG:")) {
                                 val parts = message.split(":")
                                 val peerName = parts.getOrNull(1) ?: "Thiết bị"
                                 val peerPort = parts.getOrNull(2)?.toIntOrNull() ?: TCP_TRANSFER_PORT
@@ -205,7 +205,7 @@ object TransferEngine {
                 // Coroutine 2: Periodically broadcast search pings
                 while (isActive) {
                     try {
-                        val pingMsg = "SWIFTSHARE_PING:$deviceName"
+                        val pingMsg = "SUPERTRANSFER_PING:$deviceName"
                         val pingBytes = pingMsg.toByteArray()
                         val addresses = listOf(
                             InetAddress.getByName("255.255.255.255"),
@@ -334,11 +334,11 @@ object TransferEngine {
                 put(MediaStore.MediaColumns.MIME_TYPE, mime)
 
                 if (isImage) {
-                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/SwiftShare")
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/SuperTransfer")
                 } else if (isVideo) {
-                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/SwiftShare")
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/SuperTransfer")
                 } else {
-                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/SwiftShare")
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/SuperTransfer")
                 }
                 put(MediaStore.MediaColumns.IS_PENDING, 1)
             }
@@ -537,9 +537,9 @@ object TransferEngine {
 
                 // Success!
                 val displayPath = if (fileUri.scheme == "content") {
-                    if (isImage) "Thư viện ảnh / SwiftShare/$fileName"
-                    else if (isVideo) "Thư viện video / SwiftShare/$fileName"
-                    else "Thư mục tải về / SwiftShare/$fileName"
+                    if (isImage) "Thư viện ảnh / SuperTransfer/$fileName"
+                    else if (isVideo) "Thư viện video / SuperTransfer/$fileName"
+                    else "Thư mục tải về / SuperTransfer/$fileName"
                 } else {
                     fileUri.path ?: ""
                 }
@@ -749,13 +749,13 @@ object TransferEngine {
                 if (isImage) {
                     put(MediaStore.MediaColumns.MIME_TYPE, "image/*")
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/SwiftShare")
+                        put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/SuperTransfer")
                         put(MediaStore.MediaColumns.IS_PENDING, 1)
                     }
                 } else {
                     put(MediaStore.MediaColumns.MIME_TYPE, "video/*")
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/SwiftShare")
+                        put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/SuperTransfer")
                         put(MediaStore.MediaColumns.IS_PENDING, 1)
                     }
                 }

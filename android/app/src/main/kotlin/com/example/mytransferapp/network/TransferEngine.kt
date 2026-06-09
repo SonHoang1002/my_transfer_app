@@ -127,9 +127,9 @@ object TransferEngine {
                     try {
                         socket.receive(packet)
                         val message = String(packet.data, 0, packet.length).trim()
-                        if (message.startsWith("SWIFTSHARE_PING:")) {
+                        if (message.startsWith("SUPERTRANSFER_PING:")) {
                             // Client discovered us! Respond back directly
-                            val replyMsg = "SWIFTSHARE_PONG:$deviceName:$TCP_TRANSFER_PORT"
+                            val replyMsg = "SUPERTRANSFER_PONG:$deviceName:$TCP_TRANSFER_PORT"
                             val replyBytes = replyMsg.toByteArray()
                             val replyPacket = DatagramPacket(
                                 replyBytes,
@@ -159,89 +159,142 @@ object TransferEngine {
         udpAdvertiseJob = null
     }
 
+    private var _isScanning: Boolean =false;
     // Scan for nearby devices wishing to send file
-    fun startScanning(deviceName: String) {
+    fun startScanning(deviceName: String, timeoutMs: Int) {
         deviceMap.clear()
         _discoveredDevices.value = emptyList()
+        _isScanning = true
 
         udpScanJob?.cancel()
         udpScanJob = CoroutineScope(Dispatchers.IO).launch {
             var socket: DatagramSocket? = null
             try {
-                // Create a dynamic port socket
                 socket = DatagramSocket().apply {
-                    broadcast = true
-                    soTimeout = 1500
+                    broadcast       = true
+                    soTimeout       = 1500          // timeout mỗi lần receive
+                    sendBufferSize  = 4 * 1024      // 4KB — đủ cho UDP ping nhỏ
+                    receiveBufferSize = 8 * 1024    // 8KB — đủ cho PONG response
+                    reuseAddress    = true
                 }
 
-                // Coroutine 1: Continuously read responses
+                // Giới hạn thời gian sống của socket
+                val socketDeadline = System.currentTimeMillis() + timeoutMs
+
                 val receiveJob = launch {
                     val buffer = ByteArray(1024)
-                    while (isActive) {
+                    while (isActive && System.currentTimeMillis() < socketDeadline) {
                         val packet = DatagramPacket(buffer, buffer.size)
                         try {
                             socket.receive(packet)
                             val message = String(packet.data, 0, packet.length).trim()
-                            if (message.startsWith("SWIFTSHARE_PONG:")) {
-                                val parts = message.split(":")
+                            if (message.startsWith("SUPERTRANSFER_PONG:")) {
+                                val parts    = message.split(":")
                                 val peerName = parts.getOrNull(1) ?: "Thiết bị"
                                 val peerPort = parts.getOrNull(2)?.toIntOrNull() ?: TCP_TRANSFER_PORT
-                                val peerIp = packet.address.hostAddress ?: ""
-
-                                val device = DeviceInfo(peerName, peerIp, peerPort)
-                                deviceMap[peerIp] = device
-                                _discoveredDevices.value = deviceMap.values.toList()
-                                Log.d(TAG, "Tìm thấy thiết bị: $peerName ($peerIp:$peerPort)")
+                                val peerIp   = packet.address.hostAddress ?: ""
+                                if (peerIp.isNotEmpty()) {
+                                    val device = DeviceInfo(peerName, peerIp, peerPort)
+                                    deviceMap[peerIp] = device
+                                    _discoveredDevices.value = deviceMap.values.toList()
+                                    Log.d(TAG, "Tìm thấy thiết bị: $peerName ($peerIp:$peerPort)")
+                                }
                             }
                         } catch (e: SocketTimeoutException) {
-                            // Normal timeout, loop again
+                            // bình thường, tiếp tục vòng lặp
                         } catch (e: SocketException) {
-                            break // Socket closed
+                            break // socket đã đóng
                         } catch (e: Exception) {
                             Log.e(TAG, "Lỗi nhận phản hồi UDP", e)
                         }
                     }
                 }
 
-                // Coroutine 2: Periodically broadcast search pings
-                while (isActive) {
-                    try {
-                        val pingMsg = "SWIFTSHARE_PING:$deviceName"
-                        val pingBytes = pingMsg.toByteArray()
-                        val addresses = listOf(
-                            InetAddress.getByName("255.255.255.255"),
-                            InetAddress.getByName("192.168.1.255"),
-                            InetAddress.getByName("192.168.0.255")
-                        )
-                        for (addr in addresses) {
-                            val packet = DatagramPacket(pingBytes, pingBytes.size, addr, UDP_DISCOVERY_PORT)
-                            socket.send(packet)
+                val pingJob = launch {
+                    while (isActive && System.currentTimeMillis() < socketDeadline) {
+                        try {
+                            val pingMsg   = "SUPERTRANSFER_PING:$deviceName"
+                            val pingBytes = pingMsg.toByteArray()
+
+                            // Giới hạn danh sách broadcast — tránh flood mạng
+                            val broadcastAddresses = buildList {
+                                add(InetAddress.getByName("255.255.255.255"))
+                                // Thêm subnet của IP hiện tại nếu có
+                                getLocalSubnetBroadcast()?.let { add(it) }
+                            }
+
+                            for (addr in broadcastAddresses) {
+                                if (!socket.isClosed) {
+                                    val packet = DatagramPacket(
+                                        pingBytes, pingBytes.size,
+                                        addr, UDP_DISCOVERY_PORT
+                                    )
+                                    socket.send(packet)
+                                }
+                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Lỗi phát sóng ping", e)
                         }
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Lỗi phát sóng ping quét thiết bị", e)
-                    }
 
-                    // Remove inactive devices after 6 seconds
-                    val now = System.currentTimeMillis()
-                    val countBefore = deviceMap.size
-                    deviceMap.entries.removeIf { now - it.value.lastSeen > 6000 }
-                    if (deviceMap.size != countBefore) {
-                        _discoveredDevices.value = deviceMap.values.toList()
-                    }
+                        // Dọn thiết bị stale
+                        val now = System.currentTimeMillis()
+                        val before = deviceMap.size
+                        deviceMap.entries.removeIf { now - it.value.lastSeen > 6000 }
+                        if (deviceMap.size != before) {
+                            _discoveredDevices.value = deviceMap.values.toList()
+                        }
 
-                    delay(2000)
+                        delay(2000)
+                    }
                 }
 
+                // Timeout cứng: đóng socket sau đúng timeoutMs
+                launch {
+                    delay(timeoutMs.toLong())
+                    Log.d(TAG, "Scan timeout (${timeoutMs}ms) — closing socket")
+                    socket?.close() // unblock receive() nếu đang chờ
+                    pingJob.cancel()
+                    receiveJob.cancel()
+                }
+
+                pingJob.join()
                 receiveJob.join()
 
             } catch (e: Exception) {
                 Log.e(TAG, "Lỗi trong tiến trình quét UDP", e)
             } finally {
-                socket?.close()
+                try { socket?.close() } catch (_: Exception) {}
+                _isScanning = false
+                Log.d(TAG, "UDP scan finished")
             }
         }
     }
 
+    // Tính broadcast address từ IP hiện tại (/24 subnet)
+    private fun getLocalSubnetBroadcast(): InetAddress? {
+        return try {
+            val interfaces = NetworkInterface.getNetworkInterfaces()
+            while (interfaces.hasMoreElements()) {
+                val iface = interfaces.nextElement()
+                if (iface.isLoopback || !iface.isUp) continue
+                for (addr in iface.interfaceAddresses) {
+                    val ia = addr.address
+                    if (ia !is Inet4Address || ia.isLoopbackAddress) continue
+                    val prefix = addr.networkPrefixLength.toInt()
+                    val ip     = ia.address
+                    val mask   = (-1 shl (32 - prefix))
+                    val broadcast = ByteArray(4) { i ->
+                        (ip[i].toInt() and (mask shr (24 - i * 8)) or
+                                (0xFF and (mask shr (24 - i * 8)).inv())).toByte()
+                    }
+                    return InetAddress.getByAddress(broadcast)
+                }
+            }
+            null
+        } catch (e: Exception) {
+            null
+        }
+    }
     fun stopScanning() {
         udpScanJob?.cancel()
         udpScanJob = null
@@ -335,11 +388,11 @@ object TransferEngine {
                 put(MediaStore.MediaColumns.MIME_TYPE, mime)
 
                 if (isImage) {
-                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/SwiftShare")
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/SuperTransfer")
                 } else if (isVideo) {
-                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/SwiftShare")
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/SuperTransfer")
                 } else {
-                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/SwiftShare")
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/SuperTransfer")
                 }
                 put(MediaStore.MediaColumns.IS_PENDING, 1)
             }
@@ -538,9 +591,9 @@ object TransferEngine {
 
                 // Success!
                 val displayPath = if (fileUri.scheme == "content") {
-                    if (isImage) "Thư viện ảnh / SwiftShare/$fileName"
-                    else if (isVideo) "Thư viện video / SwiftShare/$fileName"
-                    else "Thư mục tải về / SwiftShare/$fileName"
+                    if (isImage) "Thư viện ảnh / SuperTransfer/$fileName"
+                    else if (isVideo) "Thư viện video / SuperTransfer/$fileName"
+                    else "Thư mục tải về / SuperTransfer/$fileName"
                 } else {
                     fileUri.path ?: ""
                 }
@@ -751,13 +804,13 @@ object TransferEngine {
                 if (isImage) {
                     put(MediaStore.MediaColumns.MIME_TYPE, "image/*")
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/SwiftShare")
+                        put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/SuperTransfer")
                         put(MediaStore.MediaColumns.IS_PENDING, 1)
                     }
                 } else {
                     put(MediaStore.MediaColumns.MIME_TYPE, "video/*")
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/SwiftShare")
+                        put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/SuperTransfer")
                         put(MediaStore.MediaColumns.IS_PENDING, 1)
                     }
                 }

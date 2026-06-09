@@ -15,7 +15,7 @@ import com.example.mytransferapp.MainActivity
 import com.example.mytransferapp.network.TransferEngine
 
 class TransferService : Service {
-    private val CHANNEL_ID = "swiftshare_channel_id"
+    private val CHANNEL_ID = "supertransfer_channel_id"
     private val SERVICE_NOTIFICATION_ID = 1111
     private val TRANSFER_NOTIFICATION_ID = 2222
     private var notificationManager: NotificationManager? = null
@@ -62,7 +62,7 @@ class TransferService : Service {
         val ipAddress = TransferEngine.getLocalIpAddress()
 
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("SwiftShare Đang Bật Nhận")
+            .setContentTitle("SuperTransfer Đang Bật Nhận")
             .setContentText("Tên: $deviceName | IP: $ipAddress")
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setContentIntent(pendingIntent)
@@ -99,13 +99,13 @@ class TransferService : Service {
         TransferEngine.startTcpServer(this) { title, body ->
             showLocalNotification(title, body)
         }
-        Log.d("TransferService", "Hệ thống truyền nhận SwiftShare đã sẵn sàng phục vụ.")
+        Log.d("TransferService", "Hệ thống truyền nhận SuperTransfer đã sẵn sàng phục vụ.")
     }
 
     private fun stopEngine() {
         TransferEngine.stopAdvertising()
         TransferEngine.stopTcpServer()
-        Log.d("TransferService", "Đã ngắt kết nối hệ thống truyền nhận SwiftShare.")
+        Log.d("TransferService", "Đã ngắt kết nối hệ thống truyền nhận SuperTransfer.")
     }
 
     override fun onDestroy() {
@@ -144,7 +144,7 @@ class TransferService : Service {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val serviceChannel = NotificationChannel(
                 CHANNEL_ID,
-                "SwiftShare File Transmission Service",
+                "SuperTransfer File Transmission Service",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
                 description = "Hiển thị thông báo trạng thái truyền nhận file không dây"

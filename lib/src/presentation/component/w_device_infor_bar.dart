@@ -3,6 +3,8 @@ import 'package:flutter_svg/svg.dart';
 import 'package:mytransferapp/core/my_color.dart';
 import 'package:mytransferapp/core/my_constant.dart';
 import 'package:mytransferapp/dao/home_dao.dart';
+import 'package:mytransferapp/main.dart';
+import 'package:mytransferapp/src/domain/entities/network_info.dart';
 
 class DeviceInfor extends StatefulWidget {
   final List<SendFileData> listSelectedFile;
@@ -31,6 +33,10 @@ class _DeviceInforState extends State<DeviceInfor>
 
   List<SendFileData> get reverseListSelectedFile =>
       widget.listSelectedFile.reversed.toList();
+
+  late NetworkInfo networkInfor;
+
+  bool _isLoading = true;
 
   @override
   void initState() {
@@ -75,11 +81,15 @@ class _DeviceInforState extends State<DeviceInfor>
     );
 
     // Mở rộng nếu có file
-    if (widget.listSelectedFile.isNotEmpty) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (widget.listSelectedFile.isNotEmpty) {
         _animationController.forward();
+      }
+      networkInfor = await transferInstance.getNetworkInfo();
+      setState(() {
+        _isLoading = false;
       });
-    }
+    });
   }
 
   @override
@@ -128,29 +138,32 @@ class _DeviceInforState extends State<DeviceInfor>
                   ),
                   borderRadius: BorderRadius.circular(999),
                 ),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  mainAxisSize: MainAxisSize.max,
-                  children: [
-                    Text(
-                      "Device Info",
-                      style: TextStyle(
-                        fontSize: 24,
-                        fontWeight: FontWeight.w600,
-                        color: black,
+                child: _isLoading
+                    ? Center(child: CircularProgressIndicator())
+                    : Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        mainAxisSize: MainAxisSize.max,
+                        children: [
+                          Text(
+                            networkInfor.deviceName,
+                            style: TextStyle(
+                              fontSize: 24,
+                              fontWeight: FontWeight.w600,
+                              color: black,
+                            ),
+                          ),
+
+                          // const SizedBox(width: 10),
+                          // Opacity(
+                          //   opacity: _iconOpacityAnimation.value,
+                          //   child: SvgPicture.asset(
+                          //     "${PATH_ICON}ic_edit.svg",
+                          //     height: 24,
+                          //     width: 24,
+                          //   ),
+                          // ),
+                        ],
                       ),
-                    ),
-                    const SizedBox(width: 10),
-                    Opacity(
-                      opacity: _iconOpacityAnimation.value,
-                      child: SvgPicture.asset(
-                        "${PATH_ICON}ic_edit.svg",
-                        height: 24,
-                        width: 24,
-                      ),
-                    ),
-                  ],
-                ),
               ),
 
               // File List Section (chỉ hiển thị khi có file)
@@ -194,7 +207,7 @@ class _DeviceInforState extends State<DeviceInfor>
                               icon: Icons.send,
                               bgColor: black,
                               textColor: white,
-                              onPressed: (){
+                              onPressed: () {
                                 widget.data.onSend(context);
                               },
                             ),

@@ -10,10 +10,12 @@ class TransferService {
   static final TransferService instance = TransferService._();
 
   // ── Channels ────────────────────────────────────────────────────────
-  static const _method = MethodChannel('com.swiftshare/method');
-  static const _chTransfer = EventChannel('com.swiftshare/event.transfer');
-  static const _chWifi = EventChannel('com.swiftshare/event.wifi_devices');
-  static const _chBluetooth = EventChannel('com.swiftshare/event.bt_devices');
+  static const _method = MethodChannel('com.supertransfer/method');
+  static const _chTransfer = EventChannel('com.supertransfer/event.transfer');
+  static const _chWifi = EventChannel('com.supertransfer/event.wifi_devices');
+  static const _chBluetooth = EventChannel(
+    'com.supertransfer/event.bt_devices',
+  );
 
   // ── Streams (lazy broadcast) ─────────────────────────────────────────
   Stream<TransferState?> get transferStream =>
@@ -37,7 +39,11 @@ class TransferService {
       .map((e) => BluetoothDevice.fromMap(Map<String, dynamic>.from(e as Map)));
 
   // ── Network info ─────────────────────────────────────────────────────
-
+  /// Bật server nhận file (gọi tự động khi mở app bên Android,
+  /// nhưng Flutter cũng có thể gọi lại nếu cần)
+  Future<void> startReceiveServer() =>
+      _method.invokeMethod('startReceiveServer');
+      
   Future<String> getLocalIpAddress() async =>
       await _method.invokeMethod<String>('getLocalIpAddress') ?? '';
 
@@ -63,7 +69,10 @@ class TransferService {
   // ── WiFi scan ─────────────────────────────────────────────────────────
 
   /// Bắt đầu scan — kết quả realtime qua [wifiDevicesStream]
-  Future<void> startWifiScan() => _method.invokeMethod('startWifiScan');
+  Future<void> startWifiScan({int timeoutMs = 10000}) {
+    final data = {"timeoutMs": timeoutMs};
+    return _method.invokeMethod('startWifiScan', data);
+  }
 
   Future<void> stopWifiScan() => _method.invokeMethod('stopWifiScan');
 
@@ -77,25 +86,27 @@ class TransferService {
       _method.invokeMethod('requestEnableBluetooth');
 
   /// Bắt đầu scan BT — kết quả realtime qua [bluetoothDeviceStream]
-  Future<void> startBluetoothScan() =>
-      _method.invokeMethod('startBluetoothScan');
+  Future<void> startBluetoothScan({int timeoutMs = 10000}) {
+    final data = {"timeoutMs": timeoutMs};
+    return _method.invokeMethod('startBluetoothScan', data);
+  }
 
   Future<void> stopBluetoothScan() => _method.invokeMethod('stopBluetoothScan');
 
   // ── Transfer ──────────────────────────────────────────────────────────
-
-  /// Bật server nhận file (gọi tự động khi mở app bên Android,
-  /// nhưng Flutter cũng có thể gọi lại nếu cần)
-  Future<void> startReceiveServer() =>
-      _method.invokeMethod('startReceiveServer');
 
   Future<void> stopReceiveServer() => _method.invokeMethod('stopReceiveServer');
 
   /// Gửi file qua WiFi đến [ipAddress]
   /// [filePath] là content URI hoặc absolute path
   /// Tiến trình theo dõi qua [transferStream]
-  Future<void> sendFileToIpAddress({required String ipAddress, required String filePath}) =>
-      _method.invokeMethod('sendFileToIpAddress', {'ipAddress': ipAddress, 'filePath': filePath});
+  Future<void> sendFileToIpAddress({
+    required String ipAddress,
+    required String filePath,
+  }) => _method.invokeMethod('sendFileToIpAddress', {
+    'ipAddress': ipAddress,
+    'filePath': filePath,
+  });
 
   /// Gửi file qua Bluetooth (mở share sheet hệ thống)
   Future<void> sendFileViaBluetooth({required String filePath}) =>

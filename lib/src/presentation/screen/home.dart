@@ -5,6 +5,7 @@ import 'package:mytransferapp/core/my_color.dart';
 import 'package:mytransferapp/core/my_constant.dart';
 import 'package:mytransferapp/core/my_extension.dart';
 import 'package:mytransferapp/enum/photo_permission_status.dart';
+import 'package:mytransferapp/main.dart';
 import 'package:mytransferapp/src/presentation/component/w_skeleton.dart';
 import 'package:mytransferapp/src/presentation/component/w_device_infor_bar.dart';
 import 'package:mytransferapp/src/presentation/component/w_media_card_item.dart';
@@ -34,6 +35,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         _data.loadMorePhotos();
       }
     });
+    WidgetsBinding.instance.addPostFrameCallback((timeStamp) {
+      transferInstance.requestPermissions();
+    });
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _photoScrollController.dispose();
+    transferInstance.stopReceiveServer();
+    _data.dispose();
+    super.dispose();
   }
 
   @override
@@ -57,14 +70,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     } else {
       setState(() => _permission = PhotoPermission.denied);
     }
-  }
-
-  @override
-  void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    _photoScrollController.dispose();
-    _data.dispose();
-    super.dispose();
   }
 
   @override

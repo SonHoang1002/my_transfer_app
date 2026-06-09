@@ -31,10 +31,10 @@ import kotlinx.coroutines.flow.collectLatest
 /**
  * Channel naming convention (dễ map sang iOS sau này):
  *
- *  METHOD  : com.swiftshare/method
- *  EVENT   : com.swiftshare/event.transfer      — tiến trình transfer realtime
- *  EVENT   : com.swiftshare/event.wifi_devices  — danh sách thiết bị WiFi scan
- *  EVENT   : com.swiftshare/event.bt_devices    — danh sách thiết bị Bluetooth scan
+ *  METHOD  : com.supertransfer/method
+ *  EVENT   : com.supertransfer/event.transfer      — tiến trình transfer realtime
+ *  EVENT   : com.supertransfer/event.wifi_devices  — danh sách thiết bị WiFi scan
+ *  EVENT   : com.supertransfer/event.bt_devices    — danh sách thiết bị Bluetooth scan
  *
  * Method list:
  *  ── Network info ─────────────────────────────
@@ -73,13 +73,13 @@ class MainActivity : FlutterActivity() {
 
     // ── Channel names ──────────────────────────────────────────────────
     companion object {
-        const val CH_METHOD       = "com.swiftshare/method"
-        const val CH_TRANSFER     = "com.swiftshare/event.transfer"
-        const val CH_WIFI_DEVICES = "com.swiftshare/event.wifi_devices"
-        const val CH_BT_DEVICES   = "com.swiftshare/event.bt_devices"
+        const val CH_METHOD       = "com.supertransfer/method"
+        const val CH_TRANSFER     = "com.supertransfer/event.transfer"
+        const val CH_WIFI_DEVICES = "com.supertransfer/event.wifi_devices"
+        const val CH_BT_DEVICES   = "com.supertransfer/event.bt_devices"
 
         const val REQ_PERMISSIONS = 1001
-        const val TAG = "SwiftShare"
+        const val TAG = "Supertransfer"
     }
 
     // ── Coroutine scope cho flow collectors ───────────────────────────
@@ -180,7 +180,9 @@ class MainActivity : FlutterActivity() {
 
                 // ── WiFi scan ─────────────────────────────────────────
                 "startWifiScan" -> {
-                    TransferEngine.startScanning(TransferEngine.getDeviceName())
+                    val args = call.arguments as Map<*, *>
+                    val timeoutMs = args["timeoutMs"] as Int
+                    TransferEngine.startScanning(TransferEngine.getDeviceName(), timeoutMs)
                     result.success(null)
                 }
 
@@ -213,6 +215,8 @@ class MainActivity : FlutterActivity() {
                 }
 
                 "startBluetoothScan" -> {
+                    val args = call.arguments as Map<*, *>
+                    val timeoutMs = args["timeoutMs"] as Int
                     val adapter = BluetoothAdapter.getDefaultAdapter()
                     if (adapter == null) {
                         result.error("BT_NOT_SUPPORTED", "Device does not support Bluetooth", null)
