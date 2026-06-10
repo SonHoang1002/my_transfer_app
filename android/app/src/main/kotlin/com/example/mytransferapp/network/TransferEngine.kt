@@ -12,16 +12,23 @@ import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.util.Log
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import java.io.*
 import java.net.*
 import java.util.Locale
 import java.util.Random
 import java.util.concurrent.ConcurrentHashMap
 
-// Model represented devices
 data class DeviceInfo(
     val name: String,
     val ipAddress: String,
@@ -29,7 +36,6 @@ data class DeviceInfo(
     val lastSeen: Long = System.currentTimeMillis()
 )
 
-// Active file transfer state
 data class TransferState(
     val id: Long = 0,
     val fileName: String = "",
@@ -43,40 +49,114 @@ data class TransferState(
     val error: String? = null
 )
 
+data class TransferHandle(
+    val socket: Socket,
+    val job: Job,
+)
+
+enum class SendMode {
+    SEQUENTIAL, // Lần lượt từng thiết bị
+    PARALLEL,   // Song song tất cả cùng lúc
+}
+
 object TransferEngine {
     private const val TAG = "TransferEngine"
     private const val UDP_DISCOVERY_PORT = 8889
     private const val TCP_TRANSFER_PORT = 9999
-    private const val BUFFER_SIZE = 512 * 1024 // 512KB for ultra physical device throughput
+    private const val BUFFER_SIZE = 512 * 1024 // 512KB
+
+    // ==================== STATE FLOWS ====================
 
     private val _discoveredDevices = MutableStateFlow<List<DeviceInfo>>(emptyList())
     val discoveredDevices: StateFlow<List<DeviceInfo>> = _discoveredDevices.asStateFlow()
 
-    private val _activeTransfer = MutableStateFlow<TransferState?>(null)
-    val activeTransfer: StateFlow<TransferState?> = _activeTransfer.asStateFlow()
+    // Map<transferId, TransferState> — hỗ trợ nhiều transfer cùng lúc
+    private val _transfers = MutableStateFlow<Map<Long, TransferState>>(emptyMap())
+    val transfers: StateFlow<Map<Long, TransferState>> = _transfers.asStateFlow()
+
+    // Backward compatibility — lấy transfer đầu tiên nếu chỉ cần 1
+    val activeTransfer: StateFlow<TransferState?> = _transfers
+        .map { it.values.firstOrNull() }
+        .stateIn(CoroutineScope(Dispatchers.IO), SharingStarted.Eagerly, null)
+
+    private val _isWifiScanning = MutableStateFlow(false)
+    val isWifiScanning: StateFlow<Boolean> = _isWifiScanning.asStateFlow()
+
+    private val _isBluetoothScanning = MutableStateFlow(false)
+    val isBluetoothScanning: StateFlow<Boolean> = _isBluetoothScanning.asStateFlow()
+
+    private val _isReceiving = MutableStateFlow(false)
+    val isReceiving: StateFlow<Boolean> = _isReceiving.asStateFlow()
+
+    private val _isAdvertising = MutableStateFlow(false)
+    val isAdvertising: StateFlow<Boolean> = _isAdvertising.asStateFlow()
+
+    // Stream thông báo khi có thiết bị request kết nối đến
+    private val _incomingConnectionRequest = MutableSharedFlow<DeviceInfo>(
+        replay = 0,
+        extraBufferCapacity = 8,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
+    val incomingConnectionRequest: SharedFlow<DeviceInfo> =
+        _incomingConnectionRequest.asSharedFlow()
+
+    // ==================== INTERNAL ====================
 
     private val deviceMap = ConcurrentHashMap<String, DeviceInfo>()
+
+    // Track handle (socket + job) theo transferId
+    private val activeTransfers = ConcurrentHashMap<Long, TransferHandle>()
+
     private var udpScanJob: Job? = null
     private var udpAdvertiseJob: Job? = null
     private var tcpServerJob: Job? = null
     private var serverSocket: ServerSocket? = null
-    private var activeSocket: Socket? = null
-    private var activeJob: Job? = null
 
-    fun cancelActiveTransfer() {
-        Log.d(TAG, "Đang huỷ chuyển file hoạt động...")
-        _activeTransfer.value = _activeTransfer.value?.copy(status = "FAILED", error = "Truyền file bị hủy bởi người dùng")
-        try {
-            activeSocket?.close()
-        } catch (e: Exception) {
-            Log.e(TAG, "Lỗi khi đóng socket huỷ kết nối", e)
+    // ==================== EMIT HELPERS ====================
+
+    private fun emitTransfer(state: TransferState) {
+        _transfers.update { current ->
+            current.toMutableMap().also { it[state.id] = state }
         }
-        activeSocket = null
-        activeJob?.cancel()
-        activeJob = null
     }
 
-    // Get the device name (e.g., "Google Pixel")
+    private fun removeTransfer(id: Long) {
+        _transfers.update { current ->
+            current.toMutableMap().also { it.remove(id) }
+        }
+    }
+
+    // ==================== PUBLIC API ====================
+
+    fun setBluetoothScanning(isScanning: Boolean) {
+        _isBluetoothScanning.value = isScanning
+    }
+
+    // Cancel theo transferId, hoặc cancel tất cả nếu null
+    fun cancelActiveTransfer(transferId: Long? = null) {
+        if (transferId == null) {
+            Log.d(TAG, "Huỷ tất cả transfer đang hoạt động")
+            activeTransfers.forEach { (id, handle) ->
+                _transfers.value[id]?.let { state ->
+                    emitTransfer(state.copy(status = "FAILED", error = "Bị huỷ bởi người dùng"))
+                }
+                try { handle.socket.close() } catch (e: Exception) {}
+                handle.job.cancel()
+            }
+            activeTransfers.clear()
+        } else {
+            Log.d(TAG, "Huỷ transfer id=$transferId")
+            activeTransfers[transferId]?.let { handle ->
+                _transfers.value[transferId]?.let { state ->
+                    emitTransfer(state.copy(status = "FAILED", error = "Bị huỷ bởi người dùng"))
+                }
+                try { handle.socket.close() } catch (e: Exception) {}
+                handle.job.cancel()
+                activeTransfers.remove(transferId)
+            }
+        }
+    }
+
     fun getDeviceName(): String {
         val manufacturer = Build.MANUFACTURER
         val model = Build.MODEL
@@ -87,7 +167,6 @@ object TransferEngine {
         }
     }
 
-    // Retrieve local IP Address
     fun getLocalIpAddress(): String {
         try {
             val interfaces = NetworkInterface.getNetworkInterfaces()
@@ -107,20 +186,16 @@ object TransferEngine {
         return "127.0.0.1"
     }
 
-    // --- UDP DISCOVERY ENGINE (SCANNER & ADVERTISER) ---
+    // ==================== UDP DISCOVERY ====================
 
-    // Advertise that this device is ready to RECEIVE files
     fun startAdvertising(deviceName: String) {
         udpAdvertiseJob?.cancel()
+        _isAdvertising.value = true
         udpAdvertiseJob = CoroutineScope(Dispatchers.IO).launch {
             var socket: DatagramSocket? = null
             try {
-                // Listen to discovery PINGs
-                socket = DatagramSocket(UDP_DISCOVERY_PORT).apply {
-                    reuseAddress = true
-                }
+                socket = DatagramSocket(UDP_DISCOVERY_PORT).apply { reuseAddress = true }
                 Log.d(TAG, "Bắt đầu phát sóng nhận diện trên cổng $UDP_DISCOVERY_PORT")
-
                 val buffer = ByteArray(1024)
                 while (isActive) {
                     val packet = DatagramPacket(buffer, buffer.size)
@@ -128,57 +203,52 @@ object TransferEngine {
                         socket.receive(packet)
                         val message = String(packet.data, 0, packet.length).trim()
                         if (message.startsWith("SUPERTRANSFER_PING:")) {
-                            // Client discovered us! Respond back directly
                             val replyMsg = "SUPERTRANSFER_PONG:$deviceName:$TCP_TRANSFER_PORT"
                             val replyBytes = replyMsg.toByteArray()
                             val replyPacket = DatagramPacket(
-                                replyBytes,
-                                replyBytes.size,
-                                packet.address,
-                                packet.port
+                                replyBytes, replyBytes.size,
+                                packet.address, packet.port
                             )
                             socket.send(replyPacket)
                             Log.d(TAG, "Đã phản hồi PING từ ${packet.address.hostAddress}")
                         }
                     } catch (e: SocketException) {
-                        break // Socket closed
+                        break
                     } catch (e: Exception) {
                         Log.e(TAG, "Lỗi trong vòng lặp nhận UDP", e)
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Không thể khởi động cổng phát sóng quảng bá UDP", e)
+                Log.e(TAG, "Không thể khởi động UDP advertise", e)
             } finally {
                 socket?.close()
             }
+        }.also { job ->
+            job.invokeOnCompletion { _isAdvertising.value = false }
         }
     }
 
     fun stopAdvertising() {
         udpAdvertiseJob?.cancel()
         udpAdvertiseJob = null
+        _isAdvertising.value = false
     }
 
-    private var _isScanning: Boolean =false;
-    // Scan for nearby devices wishing to send file
     fun startScanning(deviceName: String, timeoutMs: Int) {
         deviceMap.clear()
         _discoveredDevices.value = emptyList()
-        _isScanning = true
-
+        _isWifiScanning.value = true
         udpScanJob?.cancel()
         udpScanJob = CoroutineScope(Dispatchers.IO).launch {
             var socket: DatagramSocket? = null
             try {
                 socket = DatagramSocket().apply {
-                    broadcast       = true
-                    soTimeout       = 1500          // timeout mỗi lần receive
-                    sendBufferSize  = 4 * 1024      // 4KB — đủ cho UDP ping nhỏ
-                    receiveBufferSize = 8 * 1024    // 8KB — đủ cho PONG response
-                    reuseAddress    = true
+                    broadcast = true
+                    soTimeout = 1500
+                    sendBufferSize = 4 * 1024
+                    receiveBufferSize = 8 * 1024
+                    reuseAddress = true
                 }
-
-                // Giới hạn thời gian sống của socket
                 val socketDeadline = System.currentTimeMillis() + timeoutMs
 
                 val receiveJob = launch {
@@ -189,23 +259,23 @@ object TransferEngine {
                             socket.receive(packet)
                             val message = String(packet.data, 0, packet.length).trim()
                             if (message.startsWith("SUPERTRANSFER_PONG:")) {
-                                val parts    = message.split(":")
+                                val parts = message.split(":")
                                 val peerName = parts.getOrNull(1) ?: "Thiết bị"
                                 val peerPort = parts.getOrNull(2)?.toIntOrNull() ?: TCP_TRANSFER_PORT
-                                val peerIp   = packet.address.hostAddress ?: ""
+                                val peerIp = packet.address.hostAddress ?: ""
                                 if (peerIp.isNotEmpty()) {
                                     val device = DeviceInfo(peerName, peerIp, peerPort)
                                     deviceMap[peerIp] = device
                                     _discoveredDevices.value = deviceMap.values.toList()
-                                    Log.d(TAG, "Tìm thấy thiết bị: $peerName ($peerIp:$peerPort)")
+                                    Log.d(TAG, "Tìm thấy: $peerName ($peerIp:$peerPort)")
                                 }
                             }
                         } catch (e: SocketTimeoutException) {
-                            // bình thường, tiếp tục vòng lặp
+                            // bình thường
                         } catch (e: SocketException) {
-                            break // socket đã đóng
+                            break
                         } catch (e: Exception) {
-                            Log.e(TAG, "Lỗi nhận phản hồi UDP", e)
+                            Log.e(TAG, "Lỗi nhận UDP", e)
                         }
                     }
                 }
@@ -213,46 +283,32 @@ object TransferEngine {
                 val pingJob = launch {
                     while (isActive && System.currentTimeMillis() < socketDeadline) {
                         try {
-                            val pingMsg   = "SUPERTRANSFER_PING:$deviceName"
+                            val pingMsg = "SUPERTRANSFER_PING:$deviceName"
                             val pingBytes = pingMsg.toByteArray()
-
-                            // Giới hạn danh sách broadcast — tránh flood mạng
                             val broadcastAddresses = buildList {
                                 add(InetAddress.getByName("255.255.255.255"))
-                                // Thêm subnet của IP hiện tại nếu có
                                 getLocalSubnetBroadcast()?.let { add(it) }
                             }
-
                             for (addr in broadcastAddresses) {
                                 if (!socket.isClosed) {
-                                    val packet = DatagramPacket(
-                                        pingBytes, pingBytes.size,
-                                        addr, UDP_DISCOVERY_PORT
-                                    )
-                                    socket.send(packet)
+                                    socket.send(DatagramPacket(pingBytes, pingBytes.size, addr, UDP_DISCOVERY_PORT))
                                 }
                             }
                         } catch (e: Exception) {
                             Log.e(TAG, "Lỗi phát sóng ping", e)
                         }
-
-                        // Dọn thiết bị stale
                         val now = System.currentTimeMillis()
                         val before = deviceMap.size
                         deviceMap.entries.removeIf { now - it.value.lastSeen > 6000 }
-                        if (deviceMap.size != before) {
-                            _discoveredDevices.value = deviceMap.values.toList()
-                        }
-
+                        if (deviceMap.size != before) _discoveredDevices.value = deviceMap.values.toList()
                         delay(2000)
                     }
                 }
 
-                // Timeout cứng: đóng socket sau đúng timeoutMs
                 launch {
                     delay(timeoutMs.toLong())
-                    Log.d(TAG, "Scan timeout (${timeoutMs}ms) — closing socket")
-                    socket?.close() // unblock receive() nếu đang chờ
+                    Log.d(TAG, "Scan timeout — closing socket")
+                    socket?.close()
                     pingJob.cancel()
                     receiveJob.cancel()
                 }
@@ -261,16 +317,24 @@ object TransferEngine {
                 receiveJob.join()
 
             } catch (e: Exception) {
-                Log.e(TAG, "Lỗi trong tiến trình quét UDP", e)
+                Log.e(TAG, "Lỗi UDP scan", e)
             } finally {
                 try { socket?.close() } catch (_: Exception) {}
-                _isScanning = false
+                _isWifiScanning.value = false
                 Log.d(TAG, "UDP scan finished")
             }
+        }.also { job ->
+            job.invokeOnCompletion { _isWifiScanning.value = false }
         }
     }
 
-    // Tính broadcast address từ IP hiện tại (/24 subnet)
+    fun stopScanning() {
+        udpScanJob?.cancel()
+        udpScanJob = null
+        _isWifiScanning.value = false
+        _discoveredDevices.value = emptyList()
+    }
+
     private fun getLocalSubnetBroadcast(): InetAddress? {
         return try {
             val interfaces = NetworkInterface.getNetworkInterfaces()
@@ -281,8 +345,8 @@ object TransferEngine {
                     val ia = addr.address
                     if (ia !is Inet4Address || ia.isLoopbackAddress) continue
                     val prefix = addr.networkPrefixLength.toInt()
-                    val ip     = ia.address
-                    val mask   = (-1 shl (32 - prefix))
+                    val ip = ia.address
+                    val mask = (-1 shl (32 - prefix))
                     val broadcast = ByteArray(4) { i ->
                         (ip[i].toInt() and (mask shr (24 - i * 8)) or
                                 (0xFF and (mask shr (24 - i * 8)).inv())).toByte()
@@ -291,45 +355,58 @@ object TransferEngine {
                 }
             }
             null
-        } catch (e: Exception) {
-            null
-        }
-    }
-    fun stopScanning() {
-        udpScanJob?.cancel()
-        udpScanJob = null
-        _discoveredDevices.value = emptyList()
+        } catch (e: Exception) { null }
     }
 
-    // --- TCP SERVER FOR AUTO-RECEIVE ---
+    // ==================== TCP SERVER (RECEIVE) ====================
 
-    fun startTcpServer(context: Context, onNotificationRequested: (title: String, body: String) -> Unit) {
+    fun startTcpServer(
+        context: Context,
+        onNotificationRequested: (title: String, body: String) -> Unit
+    ) {
         tcpServerJob?.cancel()
         serverSocket?.close()
+        _isReceiving.value = true
 
         tcpServerJob = CoroutineScope(Dispatchers.IO).launch {
             try {
-                serverSocket = ServerSocket(TCP_TRANSFER_PORT).apply {
-                    reuseAddress = true
-                }
-                Log.d(TAG, "Máy chủ TCP đã khởi chạy trên cổng $TCP_TRANSFER_PORT")
+                serverSocket = ServerSocket(TCP_TRANSFER_PORT).apply { reuseAddress = true }
+                Log.d(TAG, "TCP server trên cổng $TCP_TRANSFER_PORT")
 
                 while (isActive) {
                     val clientSocket = try {
                         serverSocket?.accept()
-                    } catch (e: Exception) {
-                        null
-                    } ?: break
+                    } catch (e: Exception) { null } ?: break
 
-                    // Handle connection sequentially or parallel depending on need.
-                    // A single file transfer is best to avoid disk-write thrashing, but let's process each client in a separate coroutine
+                    val clientIp = clientSocket.inetAddress.hostAddress ?: ""
+                    val clientPort = clientSocket.port
+
+                    // Thông báo có thiết bị request kết nối đến
+                    _incomingConnectionRequest.tryEmit(
+                        DeviceInfo(
+                            name = "Thiết bị ($clientIp)",
+                            ipAddress = clientIp,
+                            port = clientPort,
+                        )
+                    )
+                    Log.d(TAG, "Kết nối đến từ: $clientIp:$clientPort")
+
+                    // Mỗi client xử lý trong coroutine riêng — nhận song song
+                    val transferId = Random().nextLong()
                     val incomingJob = launch {
-                        handleIncomingTransfer(context, clientSocket, onNotificationRequested)
+                        handleIncomingTransfer(
+                            context, clientSocket, transferId, onNotificationRequested
+                        )
                     }
-                    activeJob = incomingJob
+                    activeTransfers[transferId] = TransferHandle(
+                        socket = clientSocket,
+                        job = incomingJob
+                    )
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Lỗi nghiêm trọng máy chủ TCP", e)
+                Log.e(TAG, "Lỗi TCP server", e)
+            } finally {
+                _isReceiving.value = false
             }
         }
     }
@@ -337,18 +414,347 @@ object TransferEngine {
     fun stopTcpServer() {
         tcpServerJob?.cancel()
         tcpServerJob = null
-        try {
-            serverSocket?.close()
-        } catch (e: Exception) {
-            // normal
-        }
+        _isReceiving.value = false
+        try { serverSocket?.close() } catch (e: Exception) {}
         serverSocket = null
     }
 
-    // Helpers to create public media / downloads file pointers without duplicating data on disk
+    // ==================== SEND FILE ====================
+
+    // Gửi đến 1 thiết bị — giữ nguyên signature cũ
+    fun sendFile(
+        context: Context,
+        device: DeviceInfo,
+        fileUri: Uri,
+        senderName: String,
+        onDone: (success: Boolean, errorMsg: String?) -> Unit
+    ) {
+        val transferId = Random().nextLong()
+        val job = CoroutineScope(Dispatchers.IO).launch {
+            _sendFileSingle(context, device, fileUri, senderName, transferId, onDone)
+        }
+        // Handle sẽ được assign đầy đủ bên trong _sendFileSingle sau khi connect
+    }
+
+    // Gửi đến nhiều thiết bị với 2 mode: SEQUENTIAL hoặc PARALLEL
+    fun sendFileToMultiple(
+        context: Context,
+        devices: List<DeviceInfo>,
+        fileUri: Uri,
+        senderName: String,
+        mode: SendMode = SendMode.SEQUENTIAL,
+        onEachDone: (device: DeviceInfo, success: Boolean, errorMsg: String?) -> Unit = { _, _, _ -> },
+        onAllDone: (results: Map<DeviceInfo, Boolean>) -> Unit = {},
+    ) {
+        CoroutineScope(Dispatchers.IO).launch {
+            val results = mutableMapOf<DeviceInfo, Boolean>()
+
+            when (mode) {
+                SendMode.SEQUENTIAL -> {
+                    // Lần lượt — đợi thiết bị này xong mới gửi tiếp thiết bị kia
+                    for (device in devices) {
+                        val transferId = Random().nextLong()
+                        val latch = CompletableDeferred<Boolean>()
+
+                        launch {
+                            _sendFileSingle(
+                                context, device, fileUri, senderName, transferId
+                            ) { ok, error ->
+                                results[device] = ok
+                                onEachDone(device, ok, error)
+                                latch.complete(ok)
+                            }
+                        }
+
+                        latch.await() // ✅ Đợi thiết bị này xong mới tiếp
+                        Log.d(TAG, "SEQUENTIAL: xong ${device.name}, tiếp tục...")
+                    }
+                }
+
+                SendMode.PARALLEL -> {
+                    // Song song — launch tất cả cùng lúc rồi đợi tất cả xong
+                    val latches = devices.map { device ->
+                        val transferId = Random().nextLong()
+                        val latch = CompletableDeferred<Boolean>()
+
+                        launch {
+                            _sendFileSingle(
+                                context, device, fileUri, senderName, transferId
+                            ) { ok, error ->
+                                results[device] = ok
+                                onEachDone(device, ok, error)
+                                latch.complete(ok)
+                            }
+                        }
+
+                        latch
+                    }
+
+                    latches.awaitAll() // ✅ Đợi tất cả song song xong
+                    Log.d(TAG, "PARALLEL: tất cả ${devices.size} thiết bị đã xong")
+                }
+            }
+
+            onAllDone(results)
+        }
+    }
+
+    // Core logic gửi 1 file — tái sử dụng cho cả single và multi
+    private suspend fun _sendFileSingle(
+        context: Context,
+        device: DeviceInfo,
+        fileUri: Uri,
+        senderName: String,
+        transferId: Long,
+        onDone: (success: Boolean, errorMsg: String?) -> Unit
+    ) {
+        var socket: Socket? = null
+        var bos: BufferedOutputStream? = null
+        var bis: BufferedInputStream? = null
+
+        try {
+            val (fileName, fileSize) = getUriDetails(context, fileUri)
+            if (fileName == null || fileSize <= 0) {
+                throw IOException("Không thể đọc thông tin file được chọn.")
+            }
+
+            emitTransfer(TransferState(
+                id = transferId,
+                fileName = fileName,
+                totalBytes = fileSize,
+                bytesTransferred = 0L,
+                progress = 0,
+                speedMbps = 0.0,
+                isIncoming = false,
+                peerName = device.name,
+                status = "CONNECTING"
+            ))
+
+            socket = Socket()
+            socket.tcpNoDelay = true
+            socket.sendBufferSize = 1024 * 1024
+            socket.connect(InetSocketAddress(device.ipAddress, device.port), 10000)
+
+            // Track handle sau khi connect thành công
+            activeTransfers[transferId] = TransferHandle(
+                socket = socket,
+                job = currentCoroutineContext()[Job]!!
+            )
+
+            emitTransfer(_transfers.value[transferId]!!.copy(status = "TRANSFERRING"))
+
+            val metaStr = "$fileName|$fileSize|$senderName"
+            val metaBytes = metaStr.toByteArray(Charsets.UTF_8)
+            bos = BufferedOutputStream(socket.getOutputStream(), 1024 * 1024)
+            val dos = DataOutputStream(bos)
+            dos.writeInt(metaBytes.size)
+            dos.write(metaBytes)
+            dos.flush()
+
+            val rawInputStream = context.contentResolver.openInputStream(fileUri)
+                ?: throw IOException("Không thể mở file được chọn.")
+            bis = BufferedInputStream(rawInputStream, 1024 * 1024)
+
+            val buffer = ByteArray(BUFFER_SIZE)
+            var bytesRead: Int
+            var totalSent = 0L
+            var lastUpdate = System.currentTimeMillis()
+            var bytesSavedSinceLastUpdate = 0L
+
+            while (currentCoroutineContext().isActive) {
+                bytesRead = bis.read(buffer)
+                if (bytesRead == -1) break
+
+                bos.write(buffer, 0, bytesRead)
+                totalSent += bytesRead
+                bytesSavedSinceLastUpdate += bytesRead
+
+                val now = System.currentTimeMillis()
+                val delta = now - lastUpdate
+                if (delta >= 500 || totalSent == fileSize) {
+                    val progress = if (fileSize > 0) ((totalSent * 100) / fileSize).toInt() else 0
+                    val speedMBs = if (delta > 0)
+                        (bytesSavedSinceLastUpdate / 1024.0 / 1024.0) / (delta / 1000.0) else 0.0
+                    _transfers.value[transferId]?.let {
+                        emitTransfer(it.copy(
+                            bytesTransferred = totalSent,
+                            progress = progress,
+                            speedMbps = speedMBs
+                        ))
+                    }
+                    lastUpdate = now
+                    bytesSavedSinceLastUpdate = 0
+                }
+            }
+
+            bos.flush()
+
+            if (totalSent >= fileSize) {
+                _transfers.value[transferId]?.let {
+                    emitTransfer(it.copy(status = "SUCCESS", progress = 100))
+                }
+                Log.d(TAG, "Đã gửi xong đến ${device.name}")
+                onDone(true, null)
+            } else {
+                throw IOException("Hủy truyền file nửa chừng.")
+            }
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Lỗi gửi file đến ${device.name}", e)
+            _transfers.value[transferId]?.let {
+                emitTransfer(it.copy(status = "FAILED", error = e.localizedMessage))
+            }
+            onDone(false, e.localizedMessage)
+        } finally {
+            activeTransfers.remove(transferId)
+            try { bis?.close() } catch (e: Exception) {}
+            try { bos?.close() } catch (e: Exception) {}
+            try { socket?.close() } catch (e: Exception) {}
+            delay(1500)
+            removeTransfer(transferId)
+        }
+    }
+
+    // ==================== INCOMING TRANSFER ====================
+
+    private suspend fun handleIncomingTransfer(
+        context: Context,
+        socket: Socket,
+        transferId: Long,
+        onNotificationRequested: (title: String, body: String) -> Unit
+    ) {
+        var dis: DataInputStream? = null
+        var bos: BufferedOutputStream? = null
+        var senderName = "Thiết bị"
+        var targetUri: Uri? = null
+
+        try {
+            socket.tcpNoDelay = true
+            socket.receiveBufferSize = 1024 * 1024
+            dis = DataInputStream(BufferedInputStream(socket.getInputStream(), 1024 * 1024))
+
+            val metaLength = dis.readInt()
+            if (metaLength <= 0 || metaLength > 1024 * 1024) throw IOException("Kích thước metadata không hợp lệ")
+
+            val metaBytes = ByteArray(metaLength)
+            dis.readFully(metaBytes)
+            val metaStr = String(metaBytes, Charsets.UTF_8)
+
+            val parts = metaStr.split("|")
+            if (parts.size < 3) throw IOException("Metadata không đúng định dạng")
+            val fileName = parts[0]
+            val fileSize = parts[1].toLongOrNull() ?: 0L
+            senderName = parts[2]
+
+            Log.d(TAG, "Nhận file: $fileName ($fileSize bytes) từ $senderName")
+            onNotificationRequested("Nhận diện gửi file", "$senderName đang gửi: $fileName")
+
+            val lowercaseName = fileName.lowercase(Locale.ROOT)
+            val isImage = lowercaseName.run {
+                endsWith(".jpg") || endsWith(".jpeg") || endsWith(".png") ||
+                        endsWith(".gif") || endsWith(".webp") || endsWith(".bmp")
+            }
+            val isVideo = lowercaseName.run {
+                endsWith(".mp4") || endsWith(".mkv") || endsWith(".mov") ||
+                        endsWith(".3gp") || endsWith(".webm") || endsWith(".avi")
+            }
+
+            val (rawStream, fileUri) = createPublicFileAndGetStream(
+                context, fileName, isImage, isVideo, fileSize
+            )
+            if (rawStream == null || fileUri == null) {
+                throw IOException("Không thể chuẩn bị luồng dữ liệu đích")
+            }
+            targetUri = fileUri
+            bos = BufferedOutputStream(rawStream, 1024 * 1024)
+
+            emitTransfer(TransferState(
+                id = transferId,
+                fileName = fileName,
+                totalBytes = fileSize,
+                bytesTransferred = 0L,
+                progress = 0,
+                speedMbps = 0.0,
+                isIncoming = true,
+                peerName = senderName,
+                status = "TRANSFERRING"
+            ))
+
+            val buffer = ByteArray(BUFFER_SIZE)
+            var bytesRead: Int
+            var totalRead = 0L
+            var lastUpdate = System.currentTimeMillis()
+            var bytesSavedSinceLastUpdate = 0L
+
+            while (totalRead < fileSize) {
+                val toRead = minOf(buffer.size.toLong(), fileSize - totalRead).toInt()
+                bytesRead = dis.read(buffer, 0, toRead)
+                if (bytesRead == -1) break
+
+                bos.write(buffer, 0, bytesRead)
+                totalRead += bytesRead
+                bytesSavedSinceLastUpdate += bytesRead
+
+                val now = System.currentTimeMillis()
+                val delta = now - lastUpdate
+                if (delta >= 500 || totalRead == fileSize) {
+                    val progress = if (fileSize > 0) ((totalRead * 100) / fileSize).toInt() else 0
+                    val speedMBs = if (delta > 0)
+                        (bytesSavedSinceLastUpdate / 1024.0 / 1024.0) / (delta / 1000.0) else 0.0
+                    _transfers.value[transferId]?.let {
+                        emitTransfer(it.copy(
+                            bytesTransferred = totalRead,
+                            progress = progress,
+                            speedMbps = speedMBs
+                        ))
+                    }
+                    lastUpdate = now
+                    bytesSavedSinceLastUpdate = 0
+                }
+            }
+
+            bos.flush()
+            bos.close()
+            bos = null
+
+            if (totalRead >= fileSize) {
+                completePendingFile(context, fileUri, fileSize)
+                if (fileUri.scheme == "file") {
+                    val fallbackFile = File(fileUri.path ?: "")
+                    if (fallbackFile.exists()) saveMediaToGallery(context, fallbackFile)
+                }
+                _transfers.value[transferId]?.let {
+                    emitTransfer(it.copy(status = "SUCCESS", progress = 100))
+                }
+                Log.d(TAG, "Nhận file thành công: $fileName")
+                onNotificationRequested("Truyền file thành công", "Đã nhận $fileName từ $senderName")
+            } else {
+                throw IOException("Luồng tải file bị gián đoạn")
+            }
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Lỗi nhận file", e)
+            _transfers.value[transferId]?.let {
+                emitTransfer(it.copy(status = "FAILED", error = e.localizedMessage))
+            }
+            try { bos?.close() } catch (e: Exception) {}
+            bos = null
+            if (targetUri != null) deletePendingFile(context, targetUri)
+            onNotificationRequested("Lỗi truyền tải", "Lỗi nhận file từ $senderName")
+        } finally {
+            activeTransfers.remove(transferId)
+            try { bos?.close() } catch (e: Exception) {}
+            try { dis?.close() } catch (e: Exception) {}
+            try { socket.close() } catch (e: Exception) {}
+            delay(1500)
+            removeTransfer(transferId)
+        }
+    }
+
+    // ==================== FILE HELPERS ====================
+
     private fun getMimeType(fileName: String): String {
-        val extension = fileName.substringAfterLast('.', "").lowercase(Locale.ROOT)
-        return when (extension) {
+        return when (fileName.substringAfterLast('.', "").lowercase(Locale.ROOT)) {
             "jpg", "jpeg" -> "image/jpeg"
             "png" -> "image/png"
             "gif" -> "image/gif"
@@ -378,81 +784,57 @@ object TransferEngine {
         fileSize: Long
     ): Pair<OutputStream?, Uri?> {
         val resolver = context.contentResolver
-        val isAtLeastQ = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
-
-        if (isAtLeastQ) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val contentValues = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
                 put(MediaStore.MediaColumns.SIZE, fileSize)
-                val mime = getMimeType(fileName)
-                put(MediaStore.MediaColumns.MIME_TYPE, mime)
-
-                if (isImage) {
-                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/SuperTransfer")
-                } else if (isVideo) {
-                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/SuperTransfer")
-                } else {
-                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/SuperTransfer")
-                }
+                put(MediaStore.MediaColumns.MIME_TYPE, getMimeType(fileName))
+                put(MediaStore.MediaColumns.RELATIVE_PATH, when {
+                    isImage -> Environment.DIRECTORY_PICTURES + "/SuperTransfer"
+                    isVideo -> Environment.DIRECTORY_MOVIES + "/SuperTransfer"
+                    else -> Environment.DIRECTORY_DOWNLOADS + "/SuperTransfer"
+                })
                 put(MediaStore.MediaColumns.IS_PENDING, 1)
             }
-
-            val collectionUri = if (isImage) {
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-            } else if (isVideo) {
-                MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-            } else {
-                MediaStore.Downloads.EXTERNAL_CONTENT_URI
+            val collectionUri = when {
+                isImage -> MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+                isVideo -> MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+                else -> MediaStore.Downloads.EXTERNAL_CONTENT_URI
             }
-
             try {
                 val uri = resolver.insert(collectionUri, contentValues)
-                if (uri != null) {
-                    val os = resolver.openOutputStream(uri)
-                    return Pair(os, uri)
-                }
+                if (uri != null) return Pair(resolver.openOutputStream(uri), uri)
             } catch (e: Exception) {
-                Log.e(TAG, "MediaStore insert failed, falling back to private storage", e)
+                Log.e(TAG, "MediaStore insert failed, fallback", e)
             }
         }
-
-        // Fallback to legacy private file storage (pre-Q or if MediaStore failures occur)
-        try {
+        return try {
             val downloadsDir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
                 ?: throw IOException("Thư mục lưu trữ không khả dụng")
             if (!downloadsDir.exists()) downloadsDir.mkdirs()
             val destFile = getUniqueFile(downloadsDir, fileName)
-            val os = FileOutputStream(destFile)
-            val uri = Uri.fromFile(destFile)
-            return Pair(os, uri)
+            Pair(FileOutputStream(destFile), Uri.fromFile(destFile))
         } catch (e: Exception) {
-            Log.e(TAG, "Fallback also failed", e)
-            return Pair(null, null)
+            Log.e(TAG, "Fallback cũng thất bại", e)
+            Pair(null, null)
         }
     }
 
     private fun completePendingFile(context: Context, uri: Uri, fileSize: Long) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && uri.scheme == "content") {
             try {
-                val contentValues = ContentValues().apply {
+                context.contentResolver.update(uri, ContentValues().apply {
                     put(MediaStore.MediaColumns.IS_PENDING, 0)
                     put(MediaStore.MediaColumns.SIZE, fileSize)
-                }
-                context.contentResolver.update(uri, contentValues, null, null)
+                }, null, null)
             } catch (e: Exception) {
-                Log.e(TAG, "Lỗi khi cập nhật IS_PENDING = 0", e)
+                Log.e(TAG, "Lỗi IS_PENDING = 0", e)
             }
         }
-        // Run media scanner if it has a file path scheme
         try {
-            val path = if (uri.scheme == "file") uri.path else null
-            if (path != null) {
-                MediaScannerConnection.scanFile(
-                    context,
-                    arrayOf(path),
-                    null
-                ) { p, scannedUri ->
-                    Log.d(TAG, "Xử lý quét file hoàn thành: $p -> $scannedUri")
+            if (uri.scheme == "file") {
+                MediaScannerConnection.scanFile(context, arrayOf(uri.path), null) { p, u ->
+                    Log.d(TAG, "Scan xong: $p -> $u")
                 }
             }
         } catch (e: Exception) {}
@@ -463,335 +845,44 @@ object TransferEngine {
             if (uri.scheme == "content") {
                 context.contentResolver.delete(uri, null, null)
             } else if (uri.scheme == "file") {
-                val file = File(uri.path ?: "")
-                if (file.exists()) {
-                    file.delete()
-                }
+                File(uri.path ?: "").takeIf { it.exists() }?.delete()
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Lỗi khi xóa file tạm do chuyển thất bại", e)
+            Log.e(TAG, "Lỗi xóa file tạm", e)
         }
     }
 
-    private suspend fun handleIncomingTransfer(
-        context: Context,
-        socket: Socket,
-        onNotificationRequested: (title: String, body: String) -> Unit
-    ) {
-        var dis: DataInputStream? = null
-        var bos: BufferedOutputStream? = null
-        var senderName = "Thiết bị"
-        var targetUri: Uri? = null
-
-        try {
-            activeSocket = socket
-            socket.tcpNoDelay = true // Disable Nagle's algorithm for faster transfers
-            socket.receiveBufferSize = 1024 * 1024 // 1MB receive buffer for maximum throughput
-            dis = DataInputStream(BufferedInputStream(socket.getInputStream(), 1024 * 1024))
-
-            // 1. Read Metadata Length
-            val metaLength = dis.readInt()
-            if (metaLength <= 0 || metaLength > 1024 * 1024) throw IOException("Kích thước metadata không hợp lệ")
-
-            // 2. Read Metadata Byte
-            val metaBytes = ByteArray(metaLength)
-            dis.readFully(metaBytes)
-            val metaStr = String(metaBytes, Charsets.UTF_8)
-
-            // Metadata Format: name|size|sender
-            val parts = metaStr.split("|")
-            if (parts.size < 3) throw IOException("Metadata không đúng định dạng")
-            val fileName = parts[0]
-            val fileSize = parts[1].toLongOrNull() ?: 0L
-            senderName = parts[2]
-
-            Log.d(TAG, "Bắt đầu nhận file: $fileName, Dung lượng: $fileSize từ: $senderName")
-            onNotificationRequested("Nhận diện gửi file", "$senderName đang gửi cho bạn: $fileName")
-
-            // 4. Create Public Output Stream (using MediaStore / Scoped Storage for high efficiency and zero copy)
-            val lowercaseName = fileName.lowercase(Locale.ROOT)
-            val isImage = lowercaseName.endsWith(".jpg") || lowercaseName.endsWith(".jpeg") ||
-                    lowercaseName.endsWith(".png") || lowercaseName.endsWith(".gif") ||
-                    lowercaseName.endsWith(".webp") || lowercaseName.endsWith(".bmp")
-            val isVideo = lowercaseName.endsWith(".mp4") || lowercaseName.endsWith(".mkv") ||
-                    lowercaseName.endsWith(".mov") || lowercaseName.endsWith(".3gp") ||
-                    lowercaseName.endsWith(".webm") || lowercaseName.endsWith(".avi")
-
-            val (rawStream, fileUri) = createPublicFileAndGetStream(context, fileName, isImage, isVideo, fileSize)
-            if (rawStream == null || fileUri == null) {
-                throw IOException("Không thể chuẩn bị luồng dữ liệu đích để lưu")
-            }
-            targetUri = fileUri
-            bos = BufferedOutputStream(rawStream, 1024 * 1024)
-
-            _activeTransfer.value = TransferState(
-                id = Random().nextLong(),
-                fileName = fileName,
-                totalBytes = fileSize,
-                bytesTransferred = 0L,
-                progress = 0,
-                speedMbps = 0.0,
-                isIncoming = true,
-                peerName = senderName,
-                status = "TRANSFERRING"
-            )
-
-            // 5. Transfer File bytes
-            val buffer = ByteArray(BUFFER_SIZE)
-            var bytesRead: Int
-            var totalRead = 0L
-            var lastUpdate = System.currentTimeMillis()
-            var bytesSavedSinceLastUpdate = 0L
-
-            // Keep track of speed of transfer
-            while (totalRead < fileSize) {
-                // Read from buffered stream
-                val toRead = java.lang.Math.min(buffer.size.toLong(), fileSize - totalRead).toInt()
-                bytesRead = dis.read(buffer, 0, toRead)
-                if (bytesRead == -1) break
-
-                bos.write(buffer, 0, bytesRead)
-                totalRead += bytesRead
-                bytesSavedSinceLastUpdate += bytesRead
-
-                val now = System.currentTimeMillis()
-                val delta = now - lastUpdate
-                if (delta >= 500 || totalRead == fileSize) {
-                    val progress = if (fileSize > 0) ((totalRead * 100) / fileSize).toInt() else 0
-                    val speedMBs = if (delta > 0) (bytesSavedSinceLastUpdate / 1024.0 / 1024.0) / (delta / 1000.0) else 0.0
-
-                    _activeTransfer.value = _activeTransfer.value?.copy(
-                        bytesTransferred = totalRead,
-                        progress = progress,
-                        speedMbps = speedMBs
-                    )
-
-                    // NOTE: Removed database update inside the I/O loop to avoid blocking operations!
-
-                    lastUpdate = now
-                    bytesSavedSinceLastUpdate = 0
-                }
-            }
-
-            bos.flush()
-            bos.close()
-            bos = null
-
-            if (totalRead >= fileSize) {
-                // Complete file pending status
-                completePendingFile(context, fileUri, fileSize)
-
-                // If fallback file was used, copy to gallery if it's media
-                if (fileUri.scheme == "file") {
-                    val fallbackFile = File(fileUri.path ?: "")
-                    if (fallbackFile.exists()) {
-                        saveMediaToGallery(context, fallbackFile)
-                    }
-                }
-
-                // Success!
-                val displayPath = if (fileUri.scheme == "content") {
-                    if (isImage) "Thư viện ảnh / SuperTransfer/$fileName"
-                    else if (isVideo) "Thư viện video / SuperTransfer/$fileName"
-                    else "Thư mục tải về / SuperTransfer/$fileName"
-                } else {
-                    fileUri.path ?: ""
-                }
-
-                _activeTransfer.value = _activeTransfer.value?.copy(status = "SUCCESS", progress = 100)
-                Log.d(TAG, "Truyền file thành công: $displayPath")
-                onNotificationRequested("Truyền file thành công", "Đã nhận được $fileName từ $senderName")
-            } else {
-                throw IOException("Luồng tải file bị gián đoạn giữa chừng")
-            }
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Lỗi khi nhận file", e)
-            _activeTransfer.value = _activeTransfer.value?.copy(status = "FAILED", error = e.localizedMessage)
-
-            // Clean up files
-            try { bos?.close() } catch (e: Exception) {}
-            bos = null
-            if (targetUri != null) {
-                deletePendingFile(context, targetUri)
-            }
-
-            onNotificationRequested("Lỗi truyền tải", "Lỗi xảy ra khi nhận file từ $senderName")
-        } finally {
-            if (activeSocket === socket) {
-                activeSocket = null
-                activeJob = null
-            }
-            try { bos?.close() } catch (e: Exception) {}
-            try { dis?.close() } catch (e: Exception) {}
-            try { socket.close() } catch (e: Exception) {}
-            delay(1500) // Keep the completed/failed state on screen for 1.5s
-            _activeTransfer.value = null
-        }
-    }
-
-
-    // --- SENDER TRANSFER INITIATION ---
-
-    fun sendFile(
-        context: Context,
-        device: DeviceInfo,
-        fileUri: Uri,
-        senderName: String,
-        onDone: (success: Boolean, errorMsg: String?) -> Unit
-    ) {
-        val sendJob = CoroutineScope(Dispatchers.IO).launch {
-            var socket: Socket? = null
-            var bos: BufferedOutputStream? = null
-            var bis: BufferedInputStream? = null
-            try {
-                // Extract Uri details
-                val (fileName, fileSize) = getUriDetails(context, fileUri)
-                if (fileName == null || fileSize <= 0) {
-                    throw IOException("Không thể đọc thông tin file được chọn.")
-                }
-
-                _activeTransfer.value = TransferState(
-                    id = Random().nextLong(),
-                    fileName = fileName,
-                    totalBytes = fileSize,
-                    bytesTransferred = 0L,
-                    progress = 0,
-                    speedMbps = 0.0,
-                    isIncoming = false,
-                    peerName = device.name,
-                    status = "CONNECTING"
-                )
-
-                // 2. Establish connection to receiver TCP Server
-                socket = Socket()
-                activeSocket = socket
-                socket.tcpNoDelay = true
-                socket.sendBufferSize = 1024 * 1024 // 1MB Send buffer size
-                socket.connect(InetSocketAddress(device.ipAddress, device.port), 10000)
-
-                _activeTransfer.value = _activeTransfer.value?.copy(status = "TRANSFERRING")
-
-                // 3. Write metadata prefix
-                val metaStr = "$fileName|$fileSize|$senderName"
-                val metaBytes = metaStr.toByteArray(Charsets.UTF_8)
-
-                bos = BufferedOutputStream(socket.getOutputStream(), 1024 * 1024)
-                val dos = DataOutputStream(bos)
-                dos.writeInt(metaBytes.size)
-                dos.write(metaBytes)
-                dos.flush()
-
-                // 4. Open and write File contents
-                val rawInputStream = context.contentResolver.openInputStream(fileUri)
-                    ?: throw IOException("Không thể mở file được chọn.")
-                bis = BufferedInputStream(rawInputStream, 1024 * 1024)
-
-                val buffer = ByteArray(BUFFER_SIZE)
-                var bytesRead: Int
-                var totalSent = 0L
-                var lastUpdate = System.currentTimeMillis()
-                var bytesSavedSinceLastUpdate = 0L
-
-                while (isActive) {
-                    bytesRead = bis.read(buffer)
-                    if (bytesRead == -1) break
-
-                    bos.write(buffer, 0, bytesRead)
-                    totalSent += bytesRead
-                    bytesSavedSinceLastUpdate += bytesRead
-
-                    val now = System.currentTimeMillis()
-                    val delta = now - lastUpdate
-                    if (delta >= 500 || totalSent == fileSize) {
-                        val progress = if (fileSize > 0) ((totalSent * 100) / fileSize).toInt() else 0
-                        val speedMBs = if (delta > 0) (bytesSavedSinceLastUpdate / 1024.0 / 1024.0) / (delta / 1000.0) else 0.0
-
-                        _activeTransfer.value = _activeTransfer.value?.copy(
-                            bytesTransferred = totalSent,
-                            progress = progress,
-                            speedMbps = speedMBs
-                        )
-
-                        // NOTE: Removed database updates within the sending loop to avoid SQLite blockages
-
-                        lastUpdate = now
-                        bytesSavedSinceLastUpdate = 0
-                    }
-                }
-
-                bos.flush()
-
-                if (totalSent >= fileSize) {
-                    // Successful completion!
-                    _activeTransfer.value = _activeTransfer.value?.copy(status = "SUCCESS", progress = 100)
-                    Log.d(TAG, "Đã gửi file xong.")
-                    onDone(true, null)
-                } else {
-                    throw IOException("Hủy truyền file nửa chừng.")
-                }
-
-            } catch (e: Exception) {
-                Log.e(TAG, "Lỗi gửi file đi", e)
-                _activeTransfer.value = _activeTransfer.value?.copy(status = "FAILED", error = e.localizedMessage)
-                onDone(false, e.localizedMessage)
-            } finally {
-                if (activeSocket === socket) {
-                    activeSocket = null
-                    activeJob = null
-                }
-                try { bis?.close() } catch (e: Exception) {}
-                try { bos?.close() } catch (e: Exception) {}
-                try { socket?.close() } catch (e: Exception) {}
-                delay(1500)
-                _activeTransfer.value = null
-            }
-        }
-        activeJob = sendJob
-    }
-
-    // Resolves simple Uri metadata details
     fun getUriDetails(context: Context, uri: Uri): Pair<String?, Long> {
         var name: String? = null
         var size = 0L
-
         if (uri.scheme == ContentResolver.SCHEME_CONTENT) {
-            val cursor = context.contentResolver.query(uri, null, null, null, null)
-            cursor?.use {
+            context.contentResolver.query(uri, null, null, null, null)?.use {
                 if (it.moveToFirst()) {
                     val nameIndex = it.getColumnIndex(OpenableColumns.DISPLAY_NAME)
                     if (nameIndex != -1) name = it.getString(nameIndex)
-
                     val sizeIndex = it.getColumnIndex(OpenableColumns.SIZE)
                     if (sizeIndex != -1) size = it.getLong(sizeIndex)
                 }
             }
         }
-        if (name == null) {
-            name = uri.path?.substringAfterLast('/')
-        }
+        if (name == null) name = uri.path?.substringAfterLast('/')
         return Pair(name, size)
     }
 
-    // Saves images and videos into Android's system photo gallery
     private fun saveMediaToGallery(context: Context, file: File) {
         val lowercaseName = file.name.lowercase(Locale.ROOT)
-        val isImage = lowercaseName.endsWith(".jpg") || lowercaseName.endsWith(".jpeg") ||
-                lowercaseName.endsWith(".png") || lowercaseName.endsWith(".gif") ||
-                lowercaseName.endsWith(".webp") || lowercaseName.endsWith(".bmp")
-
-        val isVideo = lowercaseName.endsWith(".mp4") || lowercaseName.endsWith(".mkv") ||
-                lowercaseName.endsWith(".mov") || lowercaseName.endsWith(".3gp") ||
-                lowercaseName.endsWith(".webm") || lowercaseName.endsWith(".avi")
+        val isImage = lowercaseName.run {
+            endsWith(".jpg") || endsWith(".jpeg") || endsWith(".png") ||
+                    endsWith(".gif") || endsWith(".webp") || endsWith(".bmp")
+        }
+        val isVideo = lowercaseName.run {
+            endsWith(".mp4") || endsWith(".mkv") || endsWith(".mov") ||
+                    endsWith(".3gp") || endsWith(".webm") || endsWith(".avi")
+        }
 
         if (!isImage && !isVideo) {
-            // Non-media file. Just invoke public media scanner so it can be viewed by download / file explorers
-            MediaScannerConnection.scanFile(
-                context,
-                arrayOf(file.absolutePath),
-                null
-            ) { path, scannedUri ->
-                Log.d(TAG, "File scanned: $path -> $scannedUri")
+            MediaScannerConnection.scanFile(context, arrayOf(file.absolutePath), null) { p, u ->
+                Log.d(TAG, "File scanned: $p -> $u")
             }
             return
         }
@@ -815,57 +906,39 @@ object TransferEngine {
                     }
                 }
             }
-
-            val collectionUri = if (isImage) {
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-            } else {
-                MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-            }
-
+            val collectionUri = if (isImage) MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+            else MediaStore.Video.Media.EXTERNAL_CONTENT_URI
             val uri = resolver.insert(collectionUri, contentValues)
             if (uri != null) {
-                resolver.openOutputStream(uri)?.use { outputStream ->
-                    FileInputStream(file).use { inputStream ->
+                resolver.openOutputStream(uri)?.use { out ->
+                    FileInputStream(file).use { inp ->
                         val buffer = ByteArray(BUFFER_SIZE)
                         var read: Int
-                        while (inputStream.read(buffer).also { read = it } != -1) {
-                            outputStream.write(buffer, 0, read)
-                        }
-                        outputStream.flush()
+                        while (inp.read(buffer).also { read = it } != -1) out.write(buffer, 0, read)
+                        out.flush()
                     }
                 }
-
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    contentValues.clear()
-                    contentValues.put(MediaStore.MediaColumns.IS_PENDING, 0)
-                    resolver.update(uri, contentValues, null, null)
+                    resolver.update(uri, ContentValues().apply {
+                        put(MediaStore.MediaColumns.IS_PENDING, 0)
+                    }, null, null)
                 }
-
-                // Also trigger scanner registration
-                MediaScannerConnection.scanFile(
-                    context,
-                    arrayOf(file.absolutePath),
-                    null
-                ) { path, scannedUri ->
-                    Log.d(TAG, "Scanner index completed: $path -> $scannedUri")
+                MediaScannerConnection.scanFile(context, arrayOf(file.absolutePath), null) { p, u ->
+                    Log.d(TAG, "Gallery scan: $p -> $u")
                 }
-
-                Log.d(TAG, "Lưu file media vào thư viện thành công: $uri")
+                Log.d(TAG, "Lưu gallery thành công: $uri")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Nỗ lực lưu file vào Gallery thất bại", e)
+            Log.e(TAG, "Lưu gallery thất bại", e)
         }
     }
 
-    // Prevents duplicates in received directory files
     private fun getUniqueFile(directory: File, name: String): File {
         var file = File(directory, name)
         if (!file.exists()) return file
-
         val dotIndex = name.lastIndexOf('.')
         val baseName = if (dotIndex != -1) name.substring(0, dotIndex) else name
         val extension = if (dotIndex != -1) name.substring(dotIndex) else ""
-
         var count = 1
         while (file.exists()) {
             file = File(directory, "$baseName($count)$extension")
@@ -874,3 +947,5 @@ object TransferEngine {
         return file
     }
 }
+
+

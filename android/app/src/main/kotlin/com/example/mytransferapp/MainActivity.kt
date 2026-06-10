@@ -20,9 +20,11 @@ import androidx.annotation.RequiresPermission
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.example.mytransferapp.network.DeviceInfo
+import com.example.mytransferapp.network.SendMode
 import com.example.mytransferapp.network.TransferEngine
 import com.example.mytransferapp.service.TransferService
 import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
 import kotlinx.coroutines.*
@@ -59,7 +61,7 @@ import kotlinx.coroutines.flow.collectLatest
  *  ── Transfer ─────────────────────────────────
  *  startReceiveServer()                           → void   (tự động bật khi mở app)
  *  stopReceiveServer()                            → void
- *  sendFileToIpAddress(ipAddress, filePath)       → void   (tiến trình qua event.transfer)
+ *  sendFileToMultiple(ipAddress, filePath)       → void   (tiến trình qua event.transfer)
  *  sendFileViaBluetooth(address, filePath)        → void
  *  cancelTransfer()                               → void
  *
@@ -73,11 +75,12 @@ class MainActivity : FlutterActivity() {
 
     // ── Channel names ──────────────────────────────────────────────────
     companion object {
-        const val CH_METHOD       = "com.supertransfer/method"
-        const val CH_TRANSFER     = "com.supertransfer/event.transfer"
+        const val CH_METHOD = "com.supertransfer/method"
+        const val CH_TRANSFER = "com.supertransfer/event.transfer"
         const val CH_WIFI_DEVICES = "com.supertransfer/event.wifi_devices"
-        const val CH_BT_DEVICES   = "com.supertransfer/event.bt_devices"
+        const val CH_BT_DEVICES = "com.supertransfer/event.bt_devices"
 
+        const val CH_INCOMING_REQUEST = "com.supertransfer/event.incoming_request"
         const val REQ_PERMISSIONS = 1001
         const val TAG = "Supertransfer"
     }
@@ -92,6 +95,9 @@ class MainActivity : FlutterActivity() {
 
     // ── Permission callback ────────────────────────────────────────────
     private var permissionResult: MethodChannel.Result? = null
+
+    private var incomingRequestSink: EventChannel.EventSink? = null
+
 
     // ── Bluetooth scan receiver ────────────────────────────────────────
     private var isBtReceiverRegistered = false
@@ -108,19 +114,21 @@ class MainActivity : FlutterActivity() {
                     != PackageManager.PERMISSION_GRANTED
                 ) device.address
                 else device.name ?: device.address
-            } catch (e: SecurityException) { device.address }
+            } catch (e: SecurityException) {
+                device.address
+            }
 
             val bondLabel = when (device.bondState) {
-                BluetoothDevice.BOND_BONDED  -> "bonded"
+                BluetoothDevice.BOND_BONDED -> "bonded"
                 BluetoothDevice.BOND_BONDING -> "bonding"
-                else                          -> "none"
+                else -> "none"
             }
 
             val map = mapOf(
-                "name"      to name,
-                "address"   to device.address,
+                "name" to name,
+                "address" to device.address,
                 "bondState" to bondLabel,
-                "type"      to "bluetooth"
+                "type" to "bluetooth"
             )
             btDevicesSink?.success(map)
         }
@@ -137,6 +145,7 @@ class MainActivity : FlutterActivity() {
         setupTransferEventChannel(messenger)
         setupWifiDevicesEventChannel(messenger)
         setupBtDevicesEventChannel(messenger)
+        setupIncomingRequestEventChannel(messenger)
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -144,7 +153,7 @@ class MainActivity : FlutterActivity() {
     // ──────────────────────────────────────────────────────────────────
 
     private fun setupMethodChannel(messenger: io.flutter.plugin.common.BinaryMessenger) {
-        MethodChannel(messenger, CH_METHOD).setMethodCallHandler   { call, result ->
+        MethodChannel(messenger, CH_METHOD).setMethodCallHandler { call, result ->
             when (call.method) {
 
                 // ── Network info ──────────────────────────────────────
@@ -155,11 +164,24 @@ class MainActivity : FlutterActivity() {
                     result.success(TransferEngine.getDeviceName())
 
                 "getNetworkInfo" ->
-                    result.success(mapOf(
-                        "ipAddress"        to TransferEngine.getLocalIpAddress(),
-                        "deviceName"       to TransferEngine.getDeviceName(),
-                        "isWifiConnected"  to isWifiConnected()
-                    ))
+                    result.success(
+                        mapOf(
+                            "ipAddress" to TransferEngine.getLocalIpAddress(),
+                            "deviceName" to TransferEngine.getDeviceName(),
+                            "isWifiConnected" to isWifiConnected()
+                        )
+                    )
+
+                "getTransferEngineStatus" -> {
+                    result.success(
+                        mapOf(
+                            "isWifiScanning" to TransferEngine.isWifiScanning.value,
+                            "isBluetoothScanning" to TransferEngine.isBluetoothScanning.value,
+                            "isReceiving" to TransferEngine.isReceiving.value,
+                            "isAdvertising" to TransferEngine.isAdvertising.value,
+                        )
+                    )
+                }
 
                 // ── Permission ────────────────────────────────────────
                 "checkPermissions" ->
@@ -205,7 +227,11 @@ class MainActivity : FlutterActivity() {
                                 Manifest.permission.BLUETOOTH_CONNECT
                             ) != PackageManager.PERMISSION_GRANTED
                         ) {
-                            result.error("requestEnableBluetooth", "BLUETOOTH_CONNECT Permission is not granted", null)
+                            result.error(
+                                "requestEnableBluetooth",
+                                "BLUETOOTH_CONNECT Permission is not granted",
+                                null
+                            )
                         }
                         startActivity(intent)
                         result.success(null)
@@ -229,6 +255,7 @@ class MainActivity : FlutterActivity() {
                     registerBtReceiver()
                     try {
                         adapter.startDiscovery()
+                        TransferEngine.setBluetoothScanning(true)
                         result.success(null)
                     } catch (e: SecurityException) {
                         result.error("BT_PERMISSION", e.message, null)
@@ -238,7 +265,9 @@ class MainActivity : FlutterActivity() {
                 "stopBluetoothScan" -> {
                     try {
                         BluetoothAdapter.getDefaultAdapter()?.cancelDiscovery()
-                    } catch (_: Exception) {}
+                    } catch (_: Exception) {
+                    }
+                    TransferEngine.setBluetoothScanning(false)
                     unregisterBtReceiver()
                     result.success(null)
                 }
@@ -254,28 +283,48 @@ class MainActivity : FlutterActivity() {
                     result.success(null)
                 }
 
-                "sendFileToIpAddress" -> {
-                    val ipAddress       = call.argument<String>("ipAddress")
-                    val filePath = call.argument<String>("filePath")
-                    if (ipAddress.isNullOrBlank() || filePath.isNullOrBlank()) {
-                        result.error("INVALID_ARGS", "ipAddress and filePath are required", null)
+                "sendFileToMultiple" -> {
+                    val args = call.arguments as? Map<*, *>
+                    if (args == null) {
+                        result.error("INVALID_ARGS", "arguments required", null)
                         return@setMethodCallHandler
                     }
-                    val fileUri = Uri.parse(filePath)
-                    val device  = DeviceInfo(
-                        name = "Target($ipAddress)",
-                        ipAddress = ipAddress,
-                        port = 9999
-                    )
-                    TransferEngine.sendFile(
-                        context    = applicationContext,
-                        device     = device,
-                        fileUri    = fileUri,
-                        senderName = TransferEngine.getDeviceName()
-                    ) { success, error ->
-                        if (success) result.success(null)
-                        else result.error("SEND_FAILED", error, null)
+
+                    @Suppress("UNCHECKED_CAST")
+                    val rawDevices = args["devices"] as? List<Map<*, *>>
+                    val filePath   = args["filePath"] as? String
+                    val modeStr    = args["mode"] as? String ?: "SEQUENTIAL"
+
+                    if (rawDevices.isNullOrEmpty() || filePath.isNullOrBlank()) {
+                        result.error("INVALID_ARGS", "devices and filePath are required", null)
+                        return@setMethodCallHandler
                     }
+
+                    val devices = rawDevices.map { d ->
+                        DeviceInfo(
+                            name      = d["name"] as? String ?: "",
+                            ipAddress = d["ipAddress"] as? String ?: "",
+                            port      = (d["port"] as? Int) ?: 9999,
+                        )
+                    }
+                    val mode = if (modeStr == "PARALLEL") SendMode.PARALLEL else SendMode.SEQUENTIAL
+
+                    TransferEngine.sendFileToMultiple(
+                        context    = applicationContext,
+                        devices    = devices,
+                        fileUri    = Uri.parse(filePath),
+                        senderName = TransferEngine.getDeviceName(),
+                        mode       = mode,
+                        onEachDone = { device, ok, error ->
+                            Log.d(TAG, "sendFileToMultiple onEachDone: ${device.name} success=$ok error=$error")
+                        },
+                        onAllDone  = { resultMap ->
+                            val output = resultMap.map { (device, ok) ->
+                                mapOf("name" to device.name, "ipAddress" to device.ipAddress, "success" to ok)
+                            }
+                            result.success(output)
+                        }
+                    )
                 }
 
                 "sendFileViaBluetooth" -> {
@@ -289,7 +338,8 @@ class MainActivity : FlutterActivity() {
                 }
 
                 "cancelTransfer" -> {
-                    TransferEngine.cancelActiveTransfer()
+                    val transferId = call.argument<Long>("transferId") // null = cancel tất cả
+                    TransferEngine.cancelActiveTransfer(transferId)
                     result.success(null)
                 }
 
@@ -311,14 +361,20 @@ class MainActivity : FlutterActivity() {
                 }
 
                 "openWifiSettings" -> {
-                    try { startActivity(Intent(Settings.ACTION_WIFI_SETTINGS)) }
-                    catch (e: Exception) { result.error("SETTINGS_ERROR", e.message, null); return@setMethodCallHandler }
+                    try {
+                        startActivity(Intent(Settings.ACTION_WIFI_SETTINGS))
+                    } catch (e: Exception) {
+                        result.error("SETTINGS_ERROR", e.message, null); return@setMethodCallHandler
+                    }
                     result.success(null)
                 }
 
                 "openBluetoothSettings" -> {
-                    try { startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)) }
-                    catch (e: Exception) { result.error("SETTINGS_ERROR", e.message, null); return@setMethodCallHandler }
+                    try {
+                        startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
+                    } catch (e: Exception) {
+                        result.error("SETTINGS_ERROR", e.message, null); return@setMethodCallHandler
+                    }
                     result.success(null)
                 }
 
@@ -330,32 +386,32 @@ class MainActivity : FlutterActivity() {
     // ──────────────────────────────────────────────────────────────────
     // EventChannel — transfer progress
     // ──────────────────────────────────────────────────────────────────
-    private fun setupTransferEventChannel(messenger: io.flutter.plugin.common.BinaryMessenger) {
+    private fun setupTransferEventChannel(messenger: BinaryMessenger) {
         EventChannel(messenger, CH_TRANSFER).setStreamHandler(object : EventChannel.StreamHandler {
             override fun onListen(args: Any?, sink: EventChannel.EventSink) {
                 transferSink = sink
-                // Collect TransferEngine.activeTransfer StateFlow
                 mainScope.launch {
-                    TransferEngine.activeTransfer.collectLatest { state ->
-                        if (state == null) {
-                            sink.success(null)
-                            return@collectLatest
+                    // Collect Map<Long, TransferState> — emit list ra Flutter
+                    TransferEngine.transfers.collectLatest { transferMap ->
+                        val list = transferMap.values.map { state ->
+                            mapOf(
+                                "id" to state.id,
+                                "fileName" to state.fileName,
+                                "totalBytes" to state.totalBytes,
+                                "bytesTransferred" to state.bytesTransferred,
+                                "progress" to state.progress,
+                                "speedMbps" to state.speedMbps,
+                                "isIncoming" to state.isIncoming,
+                                "peerName" to state.peerName,
+                                "status" to state.status,
+                                "error" to (state.error ?: "")
+                            )
                         }
-                        sink.success(mapOf(
-                            "id"               to state.id,
-                            "fileName"         to state.fileName,
-                            "totalBytes"       to state.totalBytes,
-                            "bytesTransferred" to state.bytesTransferred,
-                            "progress"         to state.progress,
-                            "speedMbps"        to state.speedMbps,
-                            "isIncoming"       to state.isIncoming,
-                            "peerName"         to state.peerName,
-                            "status"           to state.status,  // IDLE|CONNECTING|TRANSFERRING|SUCCESS|FAILED
-                            "error"            to (state.error ?: "")
-                        ))
+                        sink.success(list)
                     }
                 }
             }
+
             override fun onCancel(args: Any?) {
                 transferSink = null
             }
@@ -366,24 +422,26 @@ class MainActivity : FlutterActivity() {
     // EventChannel — WiFi discovered devices
     // ──────────────────────────────────────────────────────────────────
     private fun setupWifiDevicesEventChannel(messenger: io.flutter.plugin.common.BinaryMessenger) {
-        EventChannel(messenger, CH_WIFI_DEVICES).setStreamHandler(object : EventChannel.StreamHandler {
+        EventChannel(messenger, CH_WIFI_DEVICES).setStreamHandler(object :
+            EventChannel.StreamHandler {
             override fun onListen(args: Any?, sink: EventChannel.EventSink) {
                 wifiDevicesSink = sink
                 mainScope.launch {
                     TransferEngine.discoveredDevices.collectLatest { devices ->
                         val list = devices.map { d ->
                             mapOf(
-                                "name"      to d.name,
+                                "name" to d.name,
                                 "ipAddress" to d.ipAddress,
-                                "port"      to d.port,
-                                "lastSeen"  to d.lastSeen,
-                                "type"      to "wifi"
+                                "port" to d.port,
+                                "lastSeen" to d.lastSeen,
+                                "type" to "wifi"
                             )
                         }
                         sink.success(list)
                     }
                 }
             }
+
             override fun onCancel(args: Any?) {
                 wifiDevicesSink = null
             }
@@ -395,12 +453,41 @@ class MainActivity : FlutterActivity() {
     // (BroadcastReceiver push từng device, không phải list)
     // ──────────────────────────────────────────────────────────────────
     private fun setupBtDevicesEventChannel(messenger: io.flutter.plugin.common.BinaryMessenger) {
-        EventChannel(messenger, CH_BT_DEVICES).setStreamHandler(object : EventChannel.StreamHandler {
+        EventChannel(messenger, CH_BT_DEVICES).setStreamHandler(object :
+            EventChannel.StreamHandler {
             override fun onListen(args: Any?, sink: EventChannel.EventSink) {
                 btDevicesSink = sink
             }
+
             override fun onCancel(args: Any?) {
                 btDevicesSink = null
+            }
+        })
+    }
+
+    private fun setupIncomingRequestEventChannel(messenger: io.flutter.plugin.common.BinaryMessenger) {
+        EventChannel(messenger, CH_INCOMING_REQUEST).setStreamHandler(object :
+            EventChannel.StreamHandler {
+            override fun onListen(args: Any?, sink: EventChannel.EventSink) {
+                incomingRequestSink = sink
+                mainScope.launch {
+                    // ✅ Lắng nghe sự kiện có thiết bị request kết nối đến
+                    TransferEngine.incomingConnectionRequest.collect { device ->
+                        sink.success(
+                            mapOf(
+                                "name" to device.name,
+                                "ipAddress" to device.ipAddress,
+                                "port" to device.port,
+                                "lastSeen" to device.lastSeen,
+                                "type" to "wifi"
+                            )
+                        )
+                    }
+                }
+            }
+
+            override fun onCancel(args: Any?) {
+                incomingRequestSink = null
             }
         })
     }
@@ -482,7 +569,7 @@ class MainActivity : FlutterActivity() {
         val cm = getSystemService(CONNECTIVITY_SERVICE)
                 as ConnectivityManager
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            val net  = cm.activeNetwork ?: return false
+            val net = cm.activeNetwork ?: return false
             val caps = cm.getNetworkCapabilities(net) ?: return false
             caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
         } else {
@@ -499,23 +586,26 @@ class MainActivity : FlutterActivity() {
 
     private fun unregisterBtReceiver() {
         if (!isBtReceiverRegistered) return
-        try { unregisterReceiver(btReceiver) } catch (_: Exception) {}
+        try {
+            unregisterReceiver(btReceiver)
+        } catch (_: Exception) {
+        }
         isBtReceiverRegistered = false
     }
 
     private fun openFile(filePath: String, fileName: String) {
         try {
-            val uri  = Uri.parse(filePath)
-            val ext  = fileName.substringAfterLast('.', "").lowercase()
+            val uri = Uri.parse(filePath)
+            val ext = fileName.substringAfterLast('.', "").lowercase()
             val mime = when (ext) {
-                "jpg", "jpeg" -> "image/jpeg"; "png"  -> "image/png"
-                "gif"         -> "image/gif";  "webp" -> "image/webp"
-                "mp4"         -> "video/mp4";  "mkv"  -> "video/x-matroska"
-                "mov"         -> "video/quicktime"
-                "mp3"         -> "audio/mpeg"; "wav"  -> "audio/wav"
-                "pdf"         -> "application/pdf"
-                "txt"         -> "text/plain"; "zip"  -> "application/zip"
-                else          -> "*/*"
+                "jpg", "jpeg" -> "image/jpeg"; "png" -> "image/png"
+                "gif" -> "image/gif"; "webp" -> "image/webp"
+                "mp4" -> "video/mp4"; "mkv" -> "video/x-matroska"
+                "mov" -> "video/quicktime"
+                "mp3" -> "audio/mpeg"; "wav" -> "audio/wav"
+                "pdf" -> "application/pdf"
+                "txt" -> "text/plain"; "zip" -> "application/zip"
+                else -> "*/*"
             }
             startActivity(Intent(Intent.ACTION_VIEW).apply {
                 setDataAndType(uri, mime)
@@ -534,33 +624,40 @@ class MainActivity : FlutterActivity() {
                 setClassName("com.android.settings", "com.android.settings.TetherSettings")
             })
         } catch (_: Exception) {
-            try { startActivity(Intent(Settings.ACTION_WIRELESS_SETTINGS)) }
-            catch (e: Exception) { Log.e(TAG, "openHotspotSettings error: ${e.message}") }
+            try {
+                startActivity(Intent(Settings.ACTION_WIRELESS_SETTINGS))
+            } catch (e: Exception) {
+                Log.e(TAG, "openHotspotSettings error: ${e.message}")
+            }
         }
     }
 
     private fun shareFileViaBluetooth(fileUri: Uri) {
         try {
-            startActivity(Intent.createChooser(
-                Intent(Intent.ACTION_SEND).apply {
-                    type = contentResolver.getType(fileUri) ?: "*/*"
-                    putExtra(Intent.EXTRA_STREAM, fileUri)
-                    setPackage("com.android.bluetooth")
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                },
-                "Gửi file qua Bluetooth"
-            ))
+            startActivity(
+                Intent.createChooser(
+                    Intent(Intent.ACTION_SEND).apply {
+                        type = contentResolver.getType(fileUri) ?: "*/*"
+                        putExtra(Intent.EXTRA_STREAM, fileUri)
+                        setPackage("com.android.bluetooth")
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    },
+                    "Gửi file qua Bluetooth"
+                )
+            )
         } catch (_: Exception) {
-            startActivity(Intent.createChooser(
-                Intent(Intent.ACTION_SEND).apply {
-                    type = contentResolver.getType(fileUri) ?: "*/*"
-                    putExtra(Intent.EXTRA_STREAM, fileUri)
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                },
-                "Chia sẻ file"
-            ))
+            startActivity(
+                Intent.createChooser(
+                    Intent(Intent.ACTION_SEND).apply {
+                        type = contentResolver.getType(fileUri) ?: "*/*"
+                        putExtra(Intent.EXTRA_STREAM, fileUri)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    },
+                    "Chia sẻ file"
+                )
+            )
         }
     }
 }
