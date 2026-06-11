@@ -44,6 +44,18 @@ class _WFindAndSendSheetState extends State<WFindAndSendSheet> {
     super.dispose();
   }
 
+  Future<void> _onRequest() async {
+    if (_requesting) return;
+    setState(() {
+      _requesting = true;
+    });
+    transferInstance.requestSendFileToMultiple(
+      devices: vListRequestWifiDevice,
+      listFilePath: widget.myDAO.getlistSendFilePath,
+    );
+    
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -180,9 +192,9 @@ class _WFindAndSendSheetState extends State<WFindAndSendSheet> {
                 ),
               ],
             ),
-            // _buildRequestButton(),
+            _buildRequestButton(),
             // _buildAcceptedDeviceAndConfirm(),
-            _buildTransferProgress(),
+            // _buildTransferProgress(),
           ],
         ),
       ),
@@ -198,12 +210,7 @@ class _WFindAndSendSheetState extends State<WFindAndSendSheet> {
             : _buildButton(
                 title: _requesting ? "Requesting" : "Request",
                 bgColor: _requesting ? black02 : black,
-                onTap: () {
-                  if (_requesting) return;
-                  setState(() {
-                    _requesting = true;
-                  });
-                },
+                onTap: _onRequest,
               );
       },
     );

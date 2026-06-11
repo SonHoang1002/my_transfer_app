@@ -1,16 +1,22 @@
-import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/svg.dart';
 import 'package:mytransferapp/core/my_color.dart';
 import 'package:mytransferapp/core/my_constant.dart';
 import 'package:mytransferapp/main.dart';
+import 'package:mytransferapp/src/domain/entities/device_infor.dart';
 import 'package:mytransferapp/src/domain/entities/network_info.dart';
-import 'package:mytransferapp/src/domain/entities/transfer_state.dart';
 import 'package:mytransferapp/src/domain/entities/wifi_device.dart';
 
 class WRequestSheet extends StatefulWidget {
-  final NetworkInfo networkInfo;
-  const WRequestSheet({super.key, required this.networkInfo});
+  final DeviceInfo deviceInfor;
+  final void Function() onAccept;
+  final void Function() onCancel;
+  const WRequestSheet({
+    super.key,
+    required this.deviceInfor,
+    required this.onAccept,
+    required this.onCancel,
+  });
 
   @override
   State<WRequestSheet> createState() => _WRequestSheetState();
@@ -108,7 +114,7 @@ class _WRequestSheetState extends State<WRequestSheet> {
     return Column(
       children: [
         Text(
-          widget.networkInfo.deviceName + "send you 11000 items",
+          "${widget.deviceInfor.name}send you 11000 items",
           style: TextStyle(
             fontSize: 17,
             fontWeight: FontWeight.w500,
@@ -135,10 +141,10 @@ class _WRequestSheetState extends State<WRequestSheet> {
           title: "Cancel",
           bgColor: black02,
           textColor: black,
-          onTap: () {},
+          onTap: widget.onCancel,
         ),
         SizedBox(width: 16),
-        _buildButton(title: "Accept", bgColor: black, onTap: () {}),
+        _buildButton(title: "Accept", bgColor: black, onTap: widget.onAccept),
       ],
     );
   }

@@ -140,7 +140,10 @@ object TransferEngine {
                 _transfers.value[id]?.let { state ->
                     emitTransfer(state.copy(status = "FAILED", error = "Bị huỷ bởi người dùng"))
                 }
-                try { handle.socket.close() } catch (e: Exception) {}
+                try {
+                    handle.socket.close()
+                } catch (e: Exception) {
+                }
                 handle.job.cancel()
             }
             activeTransfers.clear()
@@ -150,7 +153,10 @@ object TransferEngine {
                 _transfers.value[transferId]?.let { state ->
                     emitTransfer(state.copy(status = "FAILED", error = "Bị huỷ bởi người dùng"))
                 }
-                try { handle.socket.close() } catch (e: Exception) {}
+                try {
+                    handle.socket.close()
+                } catch (e: Exception) {
+                }
                 handle.job.cancel()
                 activeTransfers.remove(transferId)
             }
@@ -261,7 +267,8 @@ object TransferEngine {
                             if (message.startsWith("SUPERTRANSFER_PONG:")) {
                                 val parts = message.split(":")
                                 val peerName = parts.getOrNull(1) ?: "Thiết bị"
-                                val peerPort = parts.getOrNull(2)?.toIntOrNull() ?: TCP_TRANSFER_PORT
+                                val peerPort =
+                                    parts.getOrNull(2)?.toIntOrNull() ?: TCP_TRANSFER_PORT
                                 val peerIp = packet.address.hostAddress ?: ""
                                 if (peerIp.isNotEmpty()) {
                                     val device = DeviceInfo(peerName, peerIp, peerPort)
@@ -291,7 +298,14 @@ object TransferEngine {
                             }
                             for (addr in broadcastAddresses) {
                                 if (!socket.isClosed) {
-                                    socket.send(DatagramPacket(pingBytes, pingBytes.size, addr, UDP_DISCOVERY_PORT))
+                                    socket.send(
+                                        DatagramPacket(
+                                            pingBytes,
+                                            pingBytes.size,
+                                            addr,
+                                            UDP_DISCOVERY_PORT
+                                        )
+                                    )
                                 }
                             }
                         } catch (e: Exception) {
@@ -300,7 +314,8 @@ object TransferEngine {
                         val now = System.currentTimeMillis()
                         val before = deviceMap.size
                         deviceMap.entries.removeIf { now - it.value.lastSeen > 6000 }
-                        if (deviceMap.size != before) _discoveredDevices.value = deviceMap.values.toList()
+                        if (deviceMap.size != before) _discoveredDevices.value =
+                            deviceMap.values.toList()
                         delay(2000)
                     }
                 }
@@ -319,7 +334,10 @@ object TransferEngine {
             } catch (e: Exception) {
                 Log.e(TAG, "Lỗi UDP scan", e)
             } finally {
-                try { socket?.close() } catch (_: Exception) {}
+                try {
+                    socket?.close()
+                } catch (_: Exception) {
+                }
                 _isWifiScanning.value = false
                 Log.d(TAG, "UDP scan finished")
             }
@@ -355,7 +373,9 @@ object TransferEngine {
                 }
             }
             null
-        } catch (e: Exception) { null }
+        } catch (e: Exception) {
+            null
+        }
     }
 
     // ==================== TCP SERVER (RECEIVE) ====================
@@ -376,7 +396,9 @@ object TransferEngine {
                 while (isActive) {
                     val clientSocket = try {
                         serverSocket?.accept()
-                    } catch (e: Exception) { null } ?: break
+                    } catch (e: Exception) {
+                        null
+                    } ?: break
 
                     val clientIp = clientSocket.inetAddress.hostAddress ?: ""
                     val clientPort = clientSocket.port
@@ -415,7 +437,10 @@ object TransferEngine {
         tcpServerJob?.cancel()
         tcpServerJob = null
         _isReceiving.value = false
-        try { serverSocket?.close() } catch (e: Exception) {}
+        try {
+            serverSocket?.close()
+        } catch (e: Exception) {
+        }
         serverSocket = null
     }
 
@@ -436,67 +461,89 @@ object TransferEngine {
         // Handle sẽ được assign đầy đủ bên trong _sendFileSingle sau khi connect
     }
 
-    // Gửi đến nhiều thiết bị với 2 mode: SEQUENTIAL hoặc PARALLEL
-    fun sendFileToMultiple(
+
+    // Gửi NHIỀU file đến NHIỀU thiết bị với 2 mode: SEQUENTIAL hoặc PARALLEL
+//
+// SEQUENTIAL: gửi lần lượt từng thiết bị, mỗi thiết bị gửi lần lượt từng file
+// PARALLEL  : gửi song song tất cả thiết bị, mỗi thiết bị vẫn gửi lần lượt từng file của nó
+    fun requestSendFileToMultiple(
         context: Context,
         devices: List<DeviceInfo>,
-        fileUri: Uri,
+        fileUris: List<Uri>,
         senderName: String,
         mode: SendMode = SendMode.SEQUENTIAL,
-        onEachDone: (device: DeviceInfo, success: Boolean, errorMsg: String?) -> Unit = { _, _, _ -> },
-        onAllDone: (results: Map<DeviceInfo, Boolean>) -> Unit = {},
+        onEachFileDone: (device: DeviceInfo, fileUri: Uri, success: Boolean, errorMsg: String?) -> Unit = { _, _, _, _ -> },
+        onEachDeviceDone: (device: DeviceInfo, results: Map<Uri, Boolean>) -> Unit = { _, _ -> },
+        onAllDone: (results: Map<DeviceInfo, Map<Uri, Boolean>>) -> Unit = {},
     ) {
         CoroutineScope(Dispatchers.IO).launch {
-            val results = mutableMapOf<DeviceInfo, Boolean>()
+            val allResults = mutableMapOf<DeviceInfo, Map<Uri, Boolean>>()
 
             when (mode) {
                 SendMode.SEQUENTIAL -> {
-                    // Lần lượt — đợi thiết bị này xong mới gửi tiếp thiết bị kia
+                    // Lần lượt từng thiết bị — đợi thiết bị này gửi hết toàn bộ file rồi mới sang thiết bị kế
                     for (device in devices) {
-                        val transferId = Random().nextLong()
-                        val latch = CompletableDeferred<Boolean>()
-
-                        launch {
-                            _sendFileSingle(
-                                context, device, fileUri, senderName, transferId
-                            ) { ok, error ->
-                                results[device] = ok
-                                onEachDone(device, ok, error)
-                                latch.complete(ok)
-                            }
-                        }
-
-                        latch.await() // ✅ Đợi thiết bị này xong mới tiếp
-                        Log.d(TAG, "SEQUENTIAL: xong ${device.name}, tiếp tục...")
+                        val deviceResults = _sendFilesToDevice(
+                            context, device, fileUris, senderName, onEachFileDone
+                        )
+                        allResults[device] = deviceResults
+                        onEachDeviceDone(device, deviceResults)
+                        Log.d(TAG, "SEQUENTIAL: xong thiết bị ${device.name}")
                     }
                 }
 
                 SendMode.PARALLEL -> {
-                    // Song song — launch tất cả cùng lúc rồi đợi tất cả xong
-                    val latches = devices.map { device ->
-                        val transferId = Random().nextLong()
-                        val latch = CompletableDeferred<Boolean>()
-
-                        launch {
-                            _sendFileSingle(
-                                context, device, fileUri, senderName, transferId
-                            ) { ok, error ->
-                                results[device] = ok
-                                onEachDone(device, ok, error)
-                                latch.complete(ok)
-                            }
+                    // Song song tất cả thiết bị — mỗi thiết bị tự gửi lần lượt các file của mình
+                    val jobs = devices.map { device ->
+                        async {
+                            val deviceResults = _sendFilesToDevice(
+                                context, device, fileUris, senderName, onEachFileDone
+                            )
+                            onEachDeviceDone(device, deviceResults)
+                            device to deviceResults
                         }
-
-                        latch
                     }
-
-                    latches.awaitAll() // ✅ Đợi tất cả song song xong
+                    jobs.awaitAll().forEach { (device, results) ->
+                        allResults[device] = results
+                    }
                     Log.d(TAG, "PARALLEL: tất cả ${devices.size} thiết bị đã xong")
                 }
             }
 
-            onAllDone(results)
+            onAllDone(allResults)
         }
+    }
+
+    // Gửi lần lượt danh sách file cho 1 thiết bị — trả về Map<Uri, Boolean> kết quả từng file
+    private suspend fun _sendFilesToDevice(
+        context: Context,
+        device: DeviceInfo,
+        fileUris: List<Uri>,
+        senderName: String,
+        onEachFileDone: (device: DeviceInfo, fileUri: Uri, success: Boolean, errorMsg: String?) -> Unit,
+    ): Map<Uri, Boolean> {
+        val results = mutableMapOf<Uri, Boolean>()
+
+        for (fileUri in fileUris) {
+            val transferId = Random().nextLong()
+            val latch = CompletableDeferred<Boolean>()
+
+            coroutineScope {
+                launch {
+                    _sendFileSingle(
+                        context, device, fileUri, senderName, transferId
+                    ) { ok, error ->
+                        results[fileUri] = ok
+                        onEachFileDone(device, fileUri, ok, error)
+                        latch.complete(ok)
+                    }
+                }
+            }
+
+            latch.await() // ✅ Đợi file này gửi xong mới sang file tiếp theo (cùng thiết bị)
+        }
+
+        return results
     }
 
     // Core logic gửi 1 file — tái sử dụng cho cả single và multi
@@ -518,17 +565,19 @@ object TransferEngine {
                 throw IOException("Không thể đọc thông tin file được chọn.")
             }
 
-            emitTransfer(TransferState(
-                id = transferId,
-                fileName = fileName,
-                totalBytes = fileSize,
-                bytesTransferred = 0L,
-                progress = 0,
-                speedMbps = 0.0,
-                isIncoming = false,
-                peerName = device.name,
-                status = "CONNECTING"
-            ))
+            emitTransfer(
+                TransferState(
+                    id = transferId,
+                    fileName = fileName,
+                    totalBytes = fileSize,
+                    bytesTransferred = 0L,
+                    progress = 0,
+                    speedMbps = 0.0,
+                    isIncoming = false,
+                    peerName = device.name,
+                    status = "CONNECTING"
+                )
+            )
 
             socket = Socket()
             socket.tcpNoDelay = true
@@ -576,11 +625,13 @@ object TransferEngine {
                     val speedMBs = if (delta > 0)
                         (bytesSavedSinceLastUpdate / 1024.0 / 1024.0) / (delta / 1000.0) else 0.0
                     _transfers.value[transferId]?.let {
-                        emitTransfer(it.copy(
-                            bytesTransferred = totalSent,
-                            progress = progress,
-                            speedMbps = speedMBs
-                        ))
+                        emitTransfer(
+                            it.copy(
+                                bytesTransferred = totalSent,
+                                progress = progress,
+                                speedMbps = speedMBs
+                            )
+                        )
                     }
                     lastUpdate = now
                     bytesSavedSinceLastUpdate = 0
@@ -607,9 +658,18 @@ object TransferEngine {
             onDone(false, e.localizedMessage)
         } finally {
             activeTransfers.remove(transferId)
-            try { bis?.close() } catch (e: Exception) {}
-            try { bos?.close() } catch (e: Exception) {}
-            try { socket?.close() } catch (e: Exception) {}
+            try {
+                bis?.close()
+            } catch (e: Exception) {
+            }
+            try {
+                bos?.close()
+            } catch (e: Exception) {
+            }
+            try {
+                socket?.close()
+            } catch (e: Exception) {
+            }
             delay(1500)
             removeTransfer(transferId)
         }
@@ -668,17 +728,19 @@ object TransferEngine {
             targetUri = fileUri
             bos = BufferedOutputStream(rawStream, 1024 * 1024)
 
-            emitTransfer(TransferState(
-                id = transferId,
-                fileName = fileName,
-                totalBytes = fileSize,
-                bytesTransferred = 0L,
-                progress = 0,
-                speedMbps = 0.0,
-                isIncoming = true,
-                peerName = senderName,
-                status = "TRANSFERRING"
-            ))
+            emitTransfer(
+                TransferState(
+                    id = transferId,
+                    fileName = fileName,
+                    totalBytes = fileSize,
+                    bytesTransferred = 0L,
+                    progress = 0,
+                    speedMbps = 0.0,
+                    isIncoming = true,
+                    peerName = senderName,
+                    status = "TRANSFERRING"
+                )
+            )
 
             val buffer = ByteArray(BUFFER_SIZE)
             var bytesRead: Int
@@ -702,11 +764,13 @@ object TransferEngine {
                     val speedMBs = if (delta > 0)
                         (bytesSavedSinceLastUpdate / 1024.0 / 1024.0) / (delta / 1000.0) else 0.0
                     _transfers.value[transferId]?.let {
-                        emitTransfer(it.copy(
-                            bytesTransferred = totalRead,
-                            progress = progress,
-                            speedMbps = speedMBs
-                        ))
+                        emitTransfer(
+                            it.copy(
+                                bytesTransferred = totalRead,
+                                progress = progress,
+                                speedMbps = speedMBs
+                            )
+                        )
                     }
                     lastUpdate = now
                     bytesSavedSinceLastUpdate = 0
@@ -727,7 +791,10 @@ object TransferEngine {
                     emitTransfer(it.copy(status = "SUCCESS", progress = 100))
                 }
                 Log.d(TAG, "Nhận file thành công: $fileName")
-                onNotificationRequested("Truyền file thành công", "Đã nhận $fileName từ $senderName")
+                onNotificationRequested(
+                    "Truyền file thành công",
+                    "Đã nhận $fileName từ $senderName"
+                )
             } else {
                 throw IOException("Luồng tải file bị gián đoạn")
             }
@@ -737,15 +804,27 @@ object TransferEngine {
             _transfers.value[transferId]?.let {
                 emitTransfer(it.copy(status = "FAILED", error = e.localizedMessage))
             }
-            try { bos?.close() } catch (e: Exception) {}
+            try {
+                bos?.close()
+            } catch (e: Exception) {
+            }
             bos = null
             if (targetUri != null) deletePendingFile(context, targetUri)
             onNotificationRequested("Lỗi truyền tải", "Lỗi nhận file từ $senderName")
         } finally {
             activeTransfers.remove(transferId)
-            try { bos?.close() } catch (e: Exception) {}
-            try { dis?.close() } catch (e: Exception) {}
-            try { socket.close() } catch (e: Exception) {}
+            try {
+                bos?.close()
+            } catch (e: Exception) {
+            }
+            try {
+                dis?.close()
+            } catch (e: Exception) {
+            }
+            try {
+                socket.close()
+            } catch (e: Exception) {
+            }
             delay(1500)
             removeTransfer(transferId)
         }
@@ -789,11 +868,13 @@ object TransferEngine {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
                 put(MediaStore.MediaColumns.SIZE, fileSize)
                 put(MediaStore.MediaColumns.MIME_TYPE, getMimeType(fileName))
-                put(MediaStore.MediaColumns.RELATIVE_PATH, when {
-                    isImage -> Environment.DIRECTORY_PICTURES + "/SuperTransfer"
-                    isVideo -> Environment.DIRECTORY_MOVIES + "/SuperTransfer"
-                    else -> Environment.DIRECTORY_DOWNLOADS + "/SuperTransfer"
-                })
+                put(
+                    MediaStore.MediaColumns.RELATIVE_PATH, when {
+                        isImage -> Environment.DIRECTORY_PICTURES + "/SuperTransfer"
+                        isVideo -> Environment.DIRECTORY_MOVIES + "/SuperTransfer"
+                        else -> Environment.DIRECTORY_DOWNLOADS + "/SuperTransfer"
+                    }
+                )
                 put(MediaStore.MediaColumns.IS_PENDING, 1)
             }
             val collectionUri = when {
@@ -837,7 +918,8 @@ object TransferEngine {
                     Log.d(TAG, "Scan xong: $p -> $u")
                 }
             }
-        } catch (e: Exception) {}
+        } catch (e: Exception) {
+        }
     }
 
     private fun deletePendingFile(context: Context, uri: Uri) {
@@ -895,13 +977,19 @@ object TransferEngine {
                 if (isImage) {
                     put(MediaStore.MediaColumns.MIME_TYPE, "image/*")
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/SuperTransfer")
+                        put(
+                            MediaStore.MediaColumns.RELATIVE_PATH,
+                            Environment.DIRECTORY_PICTURES + "/SuperTransfer"
+                        )
                         put(MediaStore.MediaColumns.IS_PENDING, 1)
                     }
                 } else {
                     put(MediaStore.MediaColumns.MIME_TYPE, "video/*")
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/SuperTransfer")
+                        put(
+                            MediaStore.MediaColumns.RELATIVE_PATH,
+                            Environment.DIRECTORY_MOVIES + "/SuperTransfer"
+                        )
                         put(MediaStore.MediaColumns.IS_PENDING, 1)
                     }
                 }

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:custom_sliding_segmented_control/custom_sliding_segmented_control.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/svg.dart';
@@ -6,6 +8,9 @@ import 'package:mytransferapp/core/my_constant.dart';
 import 'package:mytransferapp/core/my_extension.dart';
 import 'package:mytransferapp/enum/photo_permission_status.dart';
 import 'package:mytransferapp/main.dart';
+import 'package:mytransferapp/src/domain/entities/device_infor.dart';
+import 'package:mytransferapp/src/domain/entities/network_info.dart';
+import 'package:mytransferapp/src/presentation/component/w_request_sheet.dart';
 import 'package:mytransferapp/src/presentation/component/w_skeleton.dart';
 import 'package:mytransferapp/src/presentation/component/w_device_infor_bar.dart';
 import 'package:mytransferapp/src/presentation/component/w_media_card_item.dart';
@@ -23,7 +28,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final MyDAO _data = MyDAO.init();
   final ScrollController _photoScrollController = ScrollController();
   PhotoPermission _permission = PhotoPermission.checking;
-
+  StreamSubscription<DeviceInfo>? _incomingRequestSub;
   @override
   void initState() {
     super.initState();
@@ -37,12 +42,44 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     });
     WidgetsBinding.instance.addPostFrameCallback((timeStamp) {
       transferInstance.requestPermissions();
+      _listenIncomingRequest();
     });
+  }
+
+  void _listenIncomingRequest() {
+    _incomingRequestSub = transferInstance.incomingRequestStream.listen((
+      deviceInfor
+    ) {
+      if (!mounted) return;
+      _showRequestSheet(deviceInfor);
+    });
+  }
+
+  // ✅ Mở request sheet khi có request đến
+  void _showRequestSheet(DeviceInfo deviceInfor) {
+    // Tránh mở nhiều sheet cùng lúc nếu nhiều request đến
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: transparent,
+      isDismissible: false, // user phải chọn Accept hoặc Cancel
+      builder: (_) => WRequestSheet(
+        deviceInfor: deviceInfor,
+        onAccept: () {
+          Navigator.of(context).pop();
+        },
+        onCancel: () {
+          Navigator.of(context).pop();
+          transferInstance.cancelTransfer();
+        },
+      ),
+    );
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _incomingRequestSub?.cancel();
     _photoScrollController.dispose();
     transferInstance.stopReceiveServer();
     _data.dispose();
@@ -177,7 +214,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     return ValueListenableBuilder(
       valueListenable: _data.vListSelectedFile,
       builder: (_, value, _) {
-        return DeviceInfor(listSelectedFile: value, data: _data);
+        return WDeviceInfor(listSelectedFile: value, data: _data);
       },
     );
   }

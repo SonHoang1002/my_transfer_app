@@ -1,7 +1,10 @@
 import 'dart:async';
 import 'package:flutter/services.dart';
+import 'package:mytransferapp/enum/send_mode_status.dart';
 import 'package:mytransferapp/src/domain/entities/bluetooth_device.dart';
+import 'package:mytransferapp/src/domain/entities/device_infor.dart';
 import 'package:mytransferapp/src/domain/entities/network_info.dart';
+import 'package:mytransferapp/src/domain/entities/transfer_engine_state.dart';
 import 'package:mytransferapp/src/domain/entities/transfer_state.dart';
 import 'package:mytransferapp/src/domain/entities/wifi_device.dart';
 
@@ -38,12 +41,20 @@ class TransferService {
       .receiveBroadcastStream()
       .map((e) => BluetoothDevice.fromMap(Map<String, dynamic>.from(e as Map)));
 
+  Stream<DeviceInfo> get incomingRequestStream {
+    return EventChannel(
+      'com.supertransfer/event.incoming_request',
+    ).receiveBroadcastStream().map(
+      (event) => DeviceInfo.fromMap(Map<String, dynamic>.from(event as Map)),
+    );
+  }
+
   // ── Network info ─────────────────────────────────────────────────────
   /// Bật server nhận file (gọi tự động khi mở app bên Android,
   /// nhưng Flutter cũng có thể gọi lại nếu cần)
   Future<void> startReceiveServer() =>
       _method.invokeMethod('startReceiveServer');
-      
+
   Future<String> getLocalIpAddress() async =>
       await _method.invokeMethod<String>('getLocalIpAddress') ?? '';
 
@@ -57,10 +68,35 @@ class TransferService {
     return NetworkInfo.fromMap(map ?? {});
   }
 
+  Future<TransferEngineState> getTransferEngineStatus() async {
+    final map = await _method.invokeMapMethod<String, dynamic>(
+      'getTransferEngineStatus',
+    );
+    return TransferEngineState.fromMap(map ?? {});
+  }
+
   // ── Permission ────────────────────────────────────────────────────────
 
   Future<bool> checkPermissions() async =>
       await _method.invokeMethod<bool>('checkPermissions') ?? false;
+
+  Future<bool> requestSendFileToMultiple({
+    required List<DeviceInfo> devices,
+    required List<String> listFilePath,
+    SendMode mode = SendMode.SEQUENTIAL,
+  }) async {
+    final data = {
+      "devices": devices,
+      "listFilePath": listFilePath,
+      "mode": mode,
+    };
+
+    return await _method.invokeMethod<bool>(
+          'requestSendFileToMultiple',
+          data,
+        ) ??
+        false;
+  }
 
   /// Trả về true nếu user cấp đủ quyền
   Future<bool> requestPermissions() async =>

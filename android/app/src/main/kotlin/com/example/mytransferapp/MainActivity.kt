@@ -283,7 +283,7 @@ class MainActivity : FlutterActivity() {
                     result.success(null)
                 }
 
-                "sendFileToMultiple" -> {
+                "requestSendFileToMultiple" -> {
                     val args = call.arguments as? Map<*, *>
                     if (args == null) {
                         result.error("INVALID_ARGS", "arguments required", null)
@@ -292,11 +292,14 @@ class MainActivity : FlutterActivity() {
 
                     @Suppress("UNCHECKED_CAST")
                     val rawDevices = args["devices"] as? List<Map<*, *>>
-                    val filePath   = args["filePath"] as? String
-                    val modeStr    = args["mode"] as? String ?: "SEQUENTIAL"
 
-                    if (rawDevices.isNullOrEmpty() || filePath.isNullOrBlank()) {
-                        result.error("INVALID_ARGS", "devices and filePath are required", null)
+                    @Suppress("UNCHECKED_CAST")
+                    val listFilePath = args["listFilePath"] as? List<String> // ✅ danh sách nhiều file
+
+                    val modeStr = args["mode"] as? String ?: "SEQUENTIAL"
+
+                    if (rawDevices.isNullOrEmpty() || listFilePath.isNullOrEmpty()) {
+                        result.error("INVALID_ARGS", "devices and listFilePath are required", null)
                         return@setMethodCallHandler
                     }
 
@@ -307,20 +310,34 @@ class MainActivity : FlutterActivity() {
                             port      = (d["port"] as? Int) ?: 9999,
                         )
                     }
+
+                    // ✅ Convert list path → list Uri
+                    val fileUris = listFilePath.map { Uri.parse(it) }
+
                     val mode = if (modeStr == "PARALLEL") SendMode.PARALLEL else SendMode.SEQUENTIAL
 
-                    TransferEngine.sendFileToMultiple(
+                    TransferEngine.requestSendFileToMultiple(
                         context    = applicationContext,
                         devices    = devices,
-                        fileUri    = Uri.parse(filePath),
+                        fileUris   = fileUris,
                         senderName = TransferEngine.getDeviceName(),
                         mode       = mode,
-                        onEachDone = { device, ok, error ->
-                            Log.d(TAG, "sendFileToMultiple onEachDone: ${device.name} success=$ok error=$error")
+                        onEachFileDone = { device, fileUri, ok, error ->
+                            Log.d(TAG, "onEachFileDone: device=${device.name} file=$fileUri success=$ok error=$error")
+                        },
+                        onEachDeviceDone = { device, results ->
+                            Log.d(TAG, "onEachDeviceDone: ${device.name} → $results")
                         },
                         onAllDone  = { resultMap ->
-                            val output = resultMap.map { (device, ok) ->
-                                mapOf("name" to device.name, "ipAddress" to device.ipAddress, "success" to ok)
+                            // resultMap: Map<DeviceInfo, Map<Uri, Boolean>>
+                            val output = resultMap.map { (device, fileResults) ->
+                                mapOf(
+                                    "name"      to device.name,
+                                    "ipAddress" to device.ipAddress,
+                                    "files"     to fileResults.map { (uri, ok) ->
+                                        mapOf("filePath" to uri.toString(), "success" to ok)
+                                    }
+                                )
                             }
                             result.success(output)
                         }
@@ -471,7 +488,6 @@ class MainActivity : FlutterActivity() {
             override fun onListen(args: Any?, sink: EventChannel.EventSink) {
                 incomingRequestSink = sink
                 mainScope.launch {
-                    // ✅ Lắng nghe sự kiện có thiết bị request kết nối đến
                     TransferEngine.incomingConnectionRequest.collect { device ->
                         sink.success(
                             mapOf(

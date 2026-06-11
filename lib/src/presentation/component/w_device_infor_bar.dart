@@ -6,21 +6,21 @@ import 'package:mytransferapp/dao/home_dao.dart';
 import 'package:mytransferapp/main.dart';
 import 'package:mytransferapp/src/domain/entities/network_info.dart';
 
-class DeviceInfor extends StatefulWidget {
+class WDeviceInfor extends StatefulWidget {
   final List<SendFileData> listSelectedFile;
   final MyDAO data;
 
-  const DeviceInfor({
+  const WDeviceInfor({
     super.key,
     required this.listSelectedFile,
     required this.data,
   });
 
   @override
-  State<DeviceInfor> createState() => _DeviceInforState();
+  State<WDeviceInfor> createState() => _WDeviceInforState();
 }
 
-class _DeviceInforState extends State<DeviceInfor>
+class _WDeviceInforState extends State<WDeviceInfor>
     with SingleTickerProviderStateMixin {
   late AnimationController _animationController;
   late Animation<double> _heightAnimation;
@@ -93,7 +93,7 @@ class _DeviceInforState extends State<DeviceInfor>
   }
 
   @override
-  void didUpdateWidget(DeviceInfor oldWidget) {
+  void didUpdateWidget(WDeviceInfor oldWidget) {
     super.didUpdateWidget(oldWidget);
     // Xử lý animation khi danh sách thay đổi
     if (widget.listSelectedFile.isNotEmpty &&

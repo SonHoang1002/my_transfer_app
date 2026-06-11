@@ -10,8 +10,8 @@ class NetworkInfo {
   });
 
   factory NetworkInfo.fromMap(Map m) => NetworkInfo(
-        ipAddress: m['ipAddress'] as String? ?? '',
-        deviceName: m['deviceName'] as String? ?? '',
-        isWifiConnected: m['isWifiConnected'] as bool? ?? false,
-      );
+    ipAddress: m['ipAddress'] as String? ?? '',
+    deviceName: m['deviceName'] as String? ?? '',
+    isWifiConnected: m['isWifiConnected'] as bool? ?? false,
+  );
 }

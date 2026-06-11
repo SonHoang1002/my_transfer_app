@@ -57,10 +57,13 @@ class MyDAO {
     showModalBottomSheet(
       context: context,
       builder: (context) {
-        return WFindAndSendSheet(myDAO: this,);
+        return WFindAndSendSheet(myDAO: this);
       },
     );
   }
+
+  List<String> get getlistSendFilePath =>
+      vListSelectedFile.value.map((e) => e.path).toList();
 
   Future<void> loadInitialPhotos() async {
     final result = await PhotoManager.requestPermissionExtend();
