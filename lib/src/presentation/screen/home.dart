@@ -9,7 +9,6 @@ import 'package:mytransferapp/core/my_extension.dart';
 import 'package:mytransferapp/enum/photo_permission_status.dart';
 import 'package:mytransferapp/main.dart';
 import 'package:mytransferapp/src/domain/entities/device_infor.dart';
-import 'package:mytransferapp/src/domain/entities/network_info.dart';
 import 'package:mytransferapp/src/presentation/component/w_request_sheet.dart';
 import 'package:mytransferapp/src/presentation/component/w_skeleton.dart';
 import 'package:mytransferapp/src/presentation/component/w_device_infor_bar.dart';

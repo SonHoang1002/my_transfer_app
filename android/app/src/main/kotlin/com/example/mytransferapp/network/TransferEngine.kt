@@ -11,6 +11,11 @@ import android.os.Environment
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.util.Log
+import com.example.mytransferapp.model.ScanMode
+import com.example.mytransferapp.model.SendMode
+import com.example.mytransferapp.model.TargetDevice
+import com.example.mytransferapp.model.TransferHandle
+import com.example.mytransferapp.model.TransferState
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -29,36 +34,6 @@ import java.util.Locale
 import java.util.Random
 import java.util.concurrent.ConcurrentHashMap
 
-data class DeviceInfo(
-    val name: String,
-    val ipAddress: String,
-    val port: Int,
-    val lastSeen: Long = System.currentTimeMillis()
-)
-
-data class TransferState(
-    val id: Long = 0,
-    val fileName: String = "",
-    val totalBytes: Long = 0,
-    val bytesTransferred: Long = 0,
-    val progress: Int = 0,
-    val speedMbps: Double = 0.0,
-    val isIncoming: Boolean = false,
-    val peerName: String = "",
-    val status: String = "IDLE", // IDLE, CONNECTING, TRANSFERRING, SUCCESS, FAILED
-    val error: String? = null
-)
-
-data class TransferHandle(
-    val socket: Socket,
-    val job: Job,
-)
-
-enum class SendMode {
-    SEQUENTIAL, // Lần lượt từng thiết bị
-    PARALLEL,   // Song song tất cả cùng lúc
-}
-
 object TransferEngine {
     private const val TAG = "TransferEngine"
     private const val UDP_DISCOVERY_PORT = 8889
@@ -67,8 +42,8 @@ object TransferEngine {
 
     // ==================== STATE FLOWS ====================
 
-    private val _discoveredDevices = MutableStateFlow<List<DeviceInfo>>(emptyList())
-    val discoveredDevices: StateFlow<List<DeviceInfo>> = _discoveredDevices.asStateFlow()
+    private val _discoveredDevices = MutableStateFlow<List<TargetDevice>>(emptyList())
+    val discoveredDevices: StateFlow<List<TargetDevice>> = _discoveredDevices.asStateFlow()
 
     // Map<transferId, TransferState> — hỗ trợ nhiều transfer cùng lúc
     private val _transfers = MutableStateFlow<Map<Long, TransferState>>(emptyMap())
@@ -92,17 +67,17 @@ object TransferEngine {
     val isAdvertising: StateFlow<Boolean> = _isAdvertising.asStateFlow()
 
     // Stream thông báo khi có thiết bị request kết nối đến
-    private val _incomingConnectionRequest = MutableSharedFlow<DeviceInfo>(
+    private val _incomingConnectionRequest = MutableSharedFlow<TargetDevice>(
         replay = 0,
         extraBufferCapacity = 8,
         onBufferOverflow = BufferOverflow.DROP_OLDEST
     )
-    val incomingConnectionRequest: SharedFlow<DeviceInfo> =
+    val incomingConnectionRequest: SharedFlow<TargetDevice> =
         _incomingConnectionRequest.asSharedFlow()
 
     // ==================== INTERNAL ====================
 
-    private val deviceMap = ConcurrentHashMap<String, DeviceInfo>()
+    private val deviceMap = ConcurrentHashMap<String, TargetDevice>()
 
     // Track handle (socket + job) theo transferId
     private val activeTransfers = ConcurrentHashMap<Long, TransferHandle>()
@@ -240,7 +215,7 @@ object TransferEngine {
         _isAdvertising.value = false
     }
 
-    fun startScanning(deviceName: String, timeoutMs: Int) {
+    fun startWifiScanning(deviceName: String, timeoutMs: Int) {
         deviceMap.clear()
         _discoveredDevices.value = emptyList()
         _isWifiScanning.value = true
@@ -271,7 +246,7 @@ object TransferEngine {
                                     parts.getOrNull(2)?.toIntOrNull() ?: TCP_TRANSFER_PORT
                                 val peerIp = packet.address.hostAddress ?: ""
                                 if (peerIp.isNotEmpty()) {
-                                    val device = DeviceInfo(peerName, peerIp, peerPort)
+                                    val device = TargetDevice(peerName, peerIp, peerPort, ScanMode.WIFI)
                                     deviceMap[peerIp] = device
                                     _discoveredDevices.value = deviceMap.values.toList()
                                     Log.d(TAG, "Tìm thấy: $peerName ($peerIp:$peerPort)")
@@ -346,7 +321,7 @@ object TransferEngine {
         }
     }
 
-    fun stopScanning() {
+    fun stopWifiScanning() {
         udpScanJob?.cancel()
         udpScanJob = null
         _isWifiScanning.value = false
@@ -405,7 +380,7 @@ object TransferEngine {
 
                     // Thông báo có thiết bị request kết nối đến
                     _incomingConnectionRequest.tryEmit(
-                        DeviceInfo(
+                        TargetDevice(
                             name = "Thiết bị ($clientIp)",
                             ipAddress = clientIp,
                             port = clientPort,
@@ -449,7 +424,7 @@ object TransferEngine {
     // Gửi đến 1 thiết bị — giữ nguyên signature cũ
     fun sendFile(
         context: Context,
-        device: DeviceInfo,
+        device: TargetDevice,
         fileUri: Uri,
         senderName: String,
         onDone: (success: Boolean, errorMsg: String?) -> Unit
@@ -468,16 +443,16 @@ object TransferEngine {
 // PARALLEL  : gửi song song tất cả thiết bị, mỗi thiết bị vẫn gửi lần lượt từng file của nó
     fun requestSendFileToMultiple(
         context: Context,
-        devices: List<DeviceInfo>,
+        devices: List<TargetDevice>,
         fileUris: List<Uri>,
         senderName: String,
         mode: SendMode = SendMode.SEQUENTIAL,
-        onEachFileDone: (device: DeviceInfo, fileUri: Uri, success: Boolean, errorMsg: String?) -> Unit = { _, _, _, _ -> },
-        onEachDeviceDone: (device: DeviceInfo, results: Map<Uri, Boolean>) -> Unit = { _, _ -> },
-        onAllDone: (results: Map<DeviceInfo, Map<Uri, Boolean>>) -> Unit = {},
+        onEachFileDone: (device: TargetDevice, fileUri: Uri, success: Boolean, errorMsg: String?) -> Unit = { _, _, _, _ -> },
+        onEachDeviceDone: (device: TargetDevice, results: Map<Uri, Boolean>) -> Unit = { _, _ -> },
+        onAllDone: (results: Map<TargetDevice, Map<Uri, Boolean>>) -> Unit = {},
     ) {
         CoroutineScope(Dispatchers.IO).launch {
-            val allResults = mutableMapOf<DeviceInfo, Map<Uri, Boolean>>()
+            val allResults = mutableMapOf<TargetDevice, Map<Uri, Boolean>>()
 
             when (mode) {
                 SendMode.SEQUENTIAL -> {
@@ -517,10 +492,10 @@ object TransferEngine {
     // Gửi lần lượt danh sách file cho 1 thiết bị — trả về Map<Uri, Boolean> kết quả từng file
     private suspend fun _sendFilesToDevice(
         context: Context,
-        device: DeviceInfo,
+        device: TargetDevice,
         fileUris: List<Uri>,
         senderName: String,
-        onEachFileDone: (device: DeviceInfo, fileUri: Uri, success: Boolean, errorMsg: String?) -> Unit,
+        onEachFileDone: (device: TargetDevice, fileUri: Uri, success: Boolean, errorMsg: String?) -> Unit,
     ): Map<Uri, Boolean> {
         val results = mutableMapOf<Uri, Boolean>()
 
@@ -549,7 +524,7 @@ object TransferEngine {
     // Core logic gửi 1 file — tái sử dụng cho cả single và multi
     private suspend fun _sendFileSingle(
         context: Context,
-        device: DeviceInfo,
+        device: TargetDevice,
         fileUri: Uri,
         senderName: String,
         transferId: Long,

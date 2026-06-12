@@ -19,8 +19,9 @@ import android.util.Log
 import androidx.annotation.RequiresPermission
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import com.example.mytransferapp.network.DeviceInfo
-import com.example.mytransferapp.network.SendMode
+import com.example.mytransferapp.model.ScanMode
+import com.example.mytransferapp.model.SendMode
+import com.example.mytransferapp.model.TargetDevice
 import com.example.mytransferapp.network.TransferEngine
 import com.example.mytransferapp.service.TransferService
 import io.flutter.embedding.engine.FlutterEngine
@@ -39,10 +40,8 @@ import kotlinx.coroutines.flow.collectLatest
  *  EVENT   : com.supertransfer/event.bt_devices    — danh sách thiết bị Bluetooth scan
  *
  * Method list:
- *  ── Network info ─────────────────────────────
- *  getLocalIpAddress()       → String
- *  getDeviceName()           → String
- *  getNetworkInfo()          → Map { ipAddress, deviceName, isWifiConnected }
+ *  ── Network info ───────────────────────────── 
+ *  getCurrentDeviceInfo()           -> Map from Device infor
  *
  *  ── Permission ───────────────────────────────
  *  checkPermissions()        → bool
@@ -157,13 +156,7 @@ class MainActivity : FlutterActivity() {
             when (call.method) {
 
                 // ── Network info ──────────────────────────────────────
-                "getLocalIpAddress" ->
-                    result.success(TransferEngine.getLocalIpAddress())
-
-                "getDeviceName" ->
-                    result.success(TransferEngine.getDeviceName())
-
-                "getNetworkInfo" ->
+                "getCurrentDeviceInfo" ->
                     result.success(
                         mapOf(
                             "ipAddress" to TransferEngine.getLocalIpAddress(),
@@ -204,12 +197,12 @@ class MainActivity : FlutterActivity() {
                 "startWifiScan" -> {
                     val args = call.arguments as Map<*, *>
                     val timeoutMs = args["timeoutMs"] as Int
-                    TransferEngine.startScanning(TransferEngine.getDeviceName(), timeoutMs)
+                    TransferEngine.startWifiScanning(TransferEngine.getDeviceName(), timeoutMs)
                     result.success(null)
                 }
 
                 "stopWifiScan" -> {
-                    TransferEngine.stopScanning()
+                    TransferEngine.stopWifiScanning()
                     result.success(null)
                 }
 
@@ -294,7 +287,8 @@ class MainActivity : FlutterActivity() {
                     val rawDevices = args["devices"] as? List<Map<*, *>>
 
                     @Suppress("UNCHECKED_CAST")
-                    val listFilePath = args["listFilePath"] as? List<String> // ✅ danh sách nhiều file
+                    val listFilePath =
+                        args["listFilePath"] as? List<String> // ✅ danh sách nhiều file
 
                     val modeStr = args["mode"] as? String ?: "SEQUENTIAL"
 
@@ -304,10 +298,11 @@ class MainActivity : FlutterActivity() {
                     }
 
                     val devices = rawDevices.map { d ->
-                        DeviceInfo(
-                            name      = d["name"] as? String ?: "",
+                        TargetDevice(
+                            name = d["name"] as? String ?: "",
                             ipAddress = d["ipAddress"] as? String ?: "",
-                            port      = (d["port"] as? Int) ?: 9999,
+                            port = (d["port"] as? Int) ?: 9999,
+                            from = ScanMode.entries[(d["from"] as Int)]
                         )
                     }
 
@@ -317,24 +312,27 @@ class MainActivity : FlutterActivity() {
                     val mode = if (modeStr == "PARALLEL") SendMode.PARALLEL else SendMode.SEQUENTIAL
 
                     TransferEngine.requestSendFileToMultiple(
-                        context    = applicationContext,
-                        devices    = devices,
-                        fileUris   = fileUris,
+                        context = applicationContext,
+                        devices = devices,
+                        fileUris = fileUris,
                         senderName = TransferEngine.getDeviceName(),
-                        mode       = mode,
+                        mode = mode,
                         onEachFileDone = { device, fileUri, ok, error ->
-                            Log.d(TAG, "onEachFileDone: device=${device.name} file=$fileUri success=$ok error=$error")
+                            Log.d(
+                                TAG,
+                                "onEachFileDone: device=${device.name} file=$fileUri success=$ok error=$error"
+                            )
                         },
                         onEachDeviceDone = { device, results ->
                             Log.d(TAG, "onEachDeviceDone: ${device.name} → $results")
                         },
-                        onAllDone  = { resultMap ->
+                        onAllDone = { resultMap ->
                             // resultMap: Map<DeviceInfo, Map<Uri, Boolean>>
                             val output = resultMap.map { (device, fileResults) ->
                                 mapOf(
-                                    "name"      to device.name,
+                                    "name" to device.name,
                                     "ipAddress" to device.ipAddress,
-                                    "files"     to fileResults.map { (uri, ok) ->
+                                    "files" to fileResults.map { (uri, ok) ->
                                         mapOf("filePath" to uri.toString(), "success" to ok)
                                     }
                                 )
@@ -522,7 +520,7 @@ class MainActivity : FlutterActivity() {
         mainScope.cancel()
         unregisterBtReceiver()
         stopService(Intent(this, TransferService::class.java))
-        TransferEngine.stopScanning()
+        TransferEngine.stopWifiScanning()
         TransferEngine.cancelActiveTransfer()
         Log.d(TAG, "onDestroy — all services stopped")
     }
