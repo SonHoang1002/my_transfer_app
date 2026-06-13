@@ -1,7 +1,9 @@
 package com.example.mytransferapp.model
 
-
-
+/**
+ * Đại diện cho thiết bị hiện tại (thiết bị đang chạy app) — dùng để trả về
+ * thông tin "device info" cho phía Flutter qua MethodChannel.
+ */
 class CurrentDevice(
     ipAddress: String,
     name: String,
@@ -34,6 +36,17 @@ class CurrentDevice(
     fun isAlive(timeoutMs: Long = 10000): Boolean {
         return System.currentTimeMillis() - lastSeen < timeoutMs
     }
+
+    /**
+     * Chuyển đổi sang Map để gửi qua MethodChannel cho Flutter
+     * (ví dụ trong "getCurrentDeviceInfo").
+     */
+    override fun toMap(): Map<String, Any?> = mapOf(
+        "name" to name,
+        "ipAddress" to ipAddress,
+        "port" to port,
+        "lastSeen" to lastSeen
+    )
 
     override fun equals(other: Any?): Boolean {
         if (this === other) return true

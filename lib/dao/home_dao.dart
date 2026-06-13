@@ -1,8 +1,10 @@
-import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'package:mytransferapp/core/my_color.dart';
 import 'package:mytransferapp/core/my_extension.dart';
+import 'package:mytransferapp/src/domain/entities/device_entity/target_device.dart';
 import 'package:mytransferapp/src/presentation/component/w_find_and_send_sheet.dart';
 import 'package:mytransferapp/enum/home_enum.dart';
+import 'package:mytransferapp/src/presentation/component/w_request_sheet.dart';
 import 'package:photo_manager/photo_manager.dart';
 
 class SendFileData {
@@ -11,6 +13,11 @@ class SendFileData {
   final SendFileType type;
 
   SendFileData({required this.uid, required this.path, required this.type});
+
+  @override
+  String toString() {
+    return 'SendFileData{uid: $uid, path: $path, type: ${type.name}}';
+  }
 }
 
 class MyDAO {
@@ -59,6 +66,22 @@ class MyDAO {
       builder: (context) {
         return WFindAndSendSheet(myDAO: this);
       },
+    );
+  }
+
+  void onDemo(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      isDismissible: false,
+      builder: (_) => WRequestSheet(
+        targetDevice: TargetDevice.createDemo(),
+        onAccept: () {
+          Navigator.of(context).pop();
+        },
+        onCancel: () {
+          Navigator.of(context).pop();
+        },
+      ),
     );
   }
 
@@ -123,22 +146,6 @@ class MyDAO {
       end: end,
     );
 
-    // Sort theo dung lượng file (file size) - từ lớn đến nhỏ
-    // if (vSortType.value == PhotoSortType.largest) {
-    //   assets = [...assets]
-    //     ..sort((a, b) async {
-    //       final aSize = await (await a.file).length();
-    //       final bSize = b.originBytes;
-    //       return bSize.compareTo(aSize);
-    //     });
-    // }
-
-    // Check nếu muốn lấy dung lượng file real (có thể dùng thêm)
-    // for (var asset in assets) {
-    //   final fileSize = await asset.originBytes?.length;
-    //   print('File: ${asset.title}, Size: ${fileSize ?? asset.size} bytes');
-    // }
-
     if (assets.length < _pageSize) _hasMorePhotos = false;
     _currentPage++;
     vPhotoAssets.value = [...vPhotoAssets.value, ...assets];
@@ -172,7 +179,7 @@ class MyDAO {
   bool isSelected(AssetEntity asset) =>
       vListSelectedFile.value.any((e) => e.uid.toString() == asset.id);
 
-  void onTogglePhoto(AssetEntity asset) {
+  void onTogglePhoto(AssetEntity asset) async {
     if (isSelected(asset)) {
       vListSelectedFile.value = vListSelectedFile.value
           .where((e) => e.uid.toString() != asset.id)
@@ -182,7 +189,7 @@ class MyDAO {
         ...vListSelectedFile.value,
         SendFileData(
           uid: int.tryParse(asset.id) ?? asset.hashCode,
-          path: asset.id,
+          path: (await asset.file)!.path,
           type: SendFileType.file,
         ),
       ];
@@ -218,5 +225,18 @@ class MyDAO {
     vListSelectedFile.dispose();
     vSortType.dispose();
     vFilterType.dispose();
+  }
+
+  @override
+  String toString() {
+    return 'MyDAO{'
+        'selectedFiles: ${vListSelectedFile.value}, '
+        'totalPhotos: ${vPhotoAssets.value}, '
+        'currentTab: ${vIndexTabGallery.value}, '
+        'sortType: ${vSortType.value.name}, '
+        'filterType: ${vFilterType.value.name}, '
+        'hasMorePhotos: $_hasMorePhotos, '
+        'currentPage: $_currentPage'
+        '}';
   }
 }

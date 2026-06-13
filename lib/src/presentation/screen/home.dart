@@ -8,13 +8,15 @@ import 'package:mytransferapp/core/my_constant.dart';
 import 'package:mytransferapp/core/my_extension.dart';
 import 'package:mytransferapp/enum/photo_permission_status.dart';
 import 'package:mytransferapp/main.dart';
-import 'package:mytransferapp/src/domain/entities/device_infor.dart';
+import 'package:mytransferapp/src/domain/entities/device_entity/target_device.dart';
+import 'package:mytransferapp/src/domain/entities/transfer_state.dart';
 import 'package:mytransferapp/src/presentation/component/w_request_sheet.dart';
 import 'package:mytransferapp/src/presentation/component/w_skeleton.dart';
 import 'package:mytransferapp/src/presentation/component/w_device_infor_bar.dart';
 import 'package:mytransferapp/src/presentation/component/w_media_card_item.dart';
 import 'package:mytransferapp/dao/home_dao.dart';
 import 'package:mytransferapp/enum/home_enum.dart';
+import 'package:mytransferapp/src/presentation/component/w_transfer_progress.dart';
 import 'package:photo_manager/photo_manager.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -27,7 +29,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final MyDAO _data = MyDAO.init();
   final ScrollController _photoScrollController = ScrollController();
   PhotoPermission _permission = PhotoPermission.checking;
-  StreamSubscription<DeviceInfo>? _incomingRequestSub;
+  StreamSubscription<TargetDevice>? _incomingRequestSub;
+
+  StreamSubscription<List<TransferState>>? _transferSub; // ✅ thêm
+  bool _isTransferSheetOpen = false;
   @override
   void initState() {
     super.initState();
@@ -42,34 +47,60 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     WidgetsBinding.instance.addPostFrameCallback((timeStamp) {
       transferInstance.requestPermissions();
       _listenIncomingRequest();
+      _listenTransfer();
     });
   }
 
   void _listenIncomingRequest() {
     _incomingRequestSub = transferInstance.incomingRequestStream.listen((
-      deviceInfor
+      deviceInfor,
     ) {
       if (!mounted) return;
       _showRequestSheet(deviceInfor);
     });
   }
 
+  // ✅ Lắng nghe tiến trình transfer (cả gửi và nhận) — tự mở sheet khi có transfer mới
+  void _listenTransfer() {
+    _transferSub = transferInstance.transferStream.listen((transfers) {
+      if (!mounted) return;
+      if (transfers.isNotEmpty && !_isTransferSheetOpen) {
+        _isTransferSheetOpen = true;
+        showModalBottomSheet(
+          context: context,
+          isDismissible: false,
+          enableDrag: false,
+          isScrollControlled: true,
+          builder: (_) => WTransferProgressSheet(
+            transferStream: transferInstance.transferStream,
+          ),
+        ).whenComplete(() {
+          _isTransferSheetOpen = false;
+        });
+      }
+    });
+  }
+
   // ✅ Mở request sheet khi có request đến
-  void _showRequestSheet(DeviceInfo deviceInfor) {
+  void _showRequestSheet(TargetDevice targetDevice) {
+    print("targetDevicetargetDevice = $targetDevice");
     // Tránh mở nhiều sheet cùng lúc nếu nhiều request đến
     showModalBottomSheet(
       context: context,
-      isScrollControlled: true,
-      backgroundColor: transparent,
-      isDismissible: false, // user phải chọn Accept hoặc Cancel
+      isDismissible: false,
       builder: (_) => WRequestSheet(
-        deviceInfor: deviceInfor,
+        targetDevice: targetDevice,
         onAccept: () {
           Navigator.of(context).pop();
+          if (targetDevice.requestId != null) {
+            transferInstance.acceptRequest(targetDevice.requestId!);
+          }
         },
         onCancel: () {
           Navigator.of(context).pop();
-          transferInstance.cancelTransfer();
+          if (targetDevice.requestId != null) {
+            transferInstance.cancelRequest(targetDevice.requestId!);
+          }
         },
       ),
     );
@@ -79,6 +110,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _incomingRequestSub?.cancel();
+    _transferSub?.cancel();
     _photoScrollController.dispose();
     transferInstance.stopReceiveServer();
     _data.dispose();

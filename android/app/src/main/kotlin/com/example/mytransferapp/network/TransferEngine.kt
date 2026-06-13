@@ -1,15 +1,12 @@
 package com.example.mytransferapp.network
 
-
 import android.content.ContentValues
-import android.content.ContentResolver
 import android.content.Context
 import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
-import android.provider.OpenableColumns
 import android.util.Log
 import com.example.mytransferapp.model.ScanMode
 import com.example.mytransferapp.model.SendMode
@@ -40,6 +37,13 @@ object TransferEngine {
     private const val TCP_TRANSFER_PORT = 9999
     private const val BUFFER_SIZE = 512 * 1024 // 512KB
 
+    // ==================== HANDSHAKE PROTOCOL ====================
+    private const val MSG_TYPE_REQUEST = 0   // Xin phép gửi N file
+    private const val MSG_TYPE_FILE = 1      // Dữ liệu file
+    private const val RESPONSE_ACCEPT = 1
+    private const val RESPONSE_REJECT = 0
+    private const val REQUEST_TIMEOUT_MS = 60_000L
+
     // ==================== STATE FLOWS ====================
 
     private val _discoveredDevices = MutableStateFlow<List<TargetDevice>>(emptyList())
@@ -66,7 +70,7 @@ object TransferEngine {
     private val _isAdvertising = MutableStateFlow(false)
     val isAdvertising: StateFlow<Boolean> = _isAdvertising.asStateFlow()
 
-    // Stream thông báo khi có thiết bị request kết nối đến
+    // Stream thông báo khi có thiết bị request gửi file đến (cần Accept/Reject)
     private val _incomingConnectionRequest = MutableSharedFlow<TargetDevice>(
         replay = 0,
         extraBufferCapacity = 8,
@@ -75,12 +79,27 @@ object TransferEngine {
     val incomingConnectionRequest: SharedFlow<TargetDevice> =
         _incomingConnectionRequest.asSharedFlow()
 
+    // Kết quả handshake gửi-đi: thiết bị đích đã accept hay reject request
+    data class SendRequestResult(val device: TargetDevice, val accepted: Boolean)
+
+    private val _sendRequestResult = MutableSharedFlow<SendRequestResult>(
+        replay = 0,
+        extraBufferCapacity = 16,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
+    val sendRequestResult: SharedFlow<SendRequestResult> = _sendRequestResult.asSharedFlow()
+
     // ==================== INTERNAL ====================
 
     private val deviceMap = ConcurrentHashMap<String, TargetDevice>()
 
     // Track handle (socket + job) theo transferId
     private val activeTransfers = ConcurrentHashMap<Long, TransferHandle>()
+
+    // Track các request đang chờ người dùng accept/reject
+    private data class PendingRequest(val deferred: CompletableDeferred<Boolean>)
+
+    private val pendingRequests = ConcurrentHashMap<Long, PendingRequest>()
 
     private var udpScanJob: Job? = null
     private var udpAdvertiseJob: Job? = null
@@ -246,7 +265,8 @@ object TransferEngine {
                                     parts.getOrNull(2)?.toIntOrNull() ?: TCP_TRANSFER_PORT
                                 val peerIp = packet.address.hostAddress ?: ""
                                 if (peerIp.isNotEmpty()) {
-                                    val device = TargetDevice(peerName, peerIp, peerPort, ScanMode.WIFI)
+                                    val device =
+                                        TargetDevice(peerIp, peerName, peerPort, ScanMode.WIFI)
                                     deviceMap[peerIp] = device
                                     _discoveredDevices.value = deviceMap.values.toList()
                                     Log.d(TAG, "Tìm thấy: $peerName ($peerIp:$peerPort)")
@@ -376,29 +396,12 @@ object TransferEngine {
                     } ?: break
 
                     val clientIp = clientSocket.inetAddress.hostAddress ?: ""
-                    val clientPort = clientSocket.port
+                    Log.d(TAG, "Kết nối đến từ: $clientIp:${clientSocket.port}")
 
-                    // Thông báo có thiết bị request kết nối đến
-                    _incomingConnectionRequest.tryEmit(
-                        TargetDevice(
-                            name = "Thiết bị ($clientIp)",
-                            ipAddress = clientIp,
-                            port = clientPort,
-                        )
-                    )
-                    Log.d(TAG, "Kết nối đến từ: $clientIp:$clientPort")
-
-                    // Mỗi client xử lý trong coroutine riêng — nhận song song
-                    val transferId = Random().nextLong()
-                    val incomingJob = launch {
-                        handleIncomingTransfer(
-                            context, clientSocket, transferId, onNotificationRequested
-                        )
+                    // Mỗi connection xử lý trong coroutine riêng — nhận song song
+                    launch {
+                        handleIncomingConnection(context, clientSocket, onNotificationRequested)
                     }
-                    activeTransfers[transferId] = TransferHandle(
-                        socket = clientSocket,
-                        job = incomingJob
-                    )
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Lỗi TCP server", e)
@@ -419,48 +422,195 @@ object TransferEngine {
         serverSocket = null
     }
 
-    // ==================== SEND FILE ====================
-
-    // Gửi đến 1 thiết bị — giữ nguyên signature cũ
-    fun sendFile(
+    // Phân loại connection: REQUEST (xin phép) hay FILE (dữ liệu)
+    private suspend fun handleIncomingConnection(
         context: Context,
-        device: TargetDevice,
-        fileUri: Uri,
-        senderName: String,
-        onDone: (success: Boolean, errorMsg: String?) -> Unit
+        socket: Socket,
+        onNotificationRequested: (title: String, body: String) -> Unit
     ) {
-        val transferId = Random().nextLong()
-        val job = CoroutineScope(Dispatchers.IO).launch {
-            _sendFileSingle(context, device, fileUri, senderName, transferId, onDone)
+        try {
+            socket.tcpNoDelay = true
+            val dis = DataInputStream(BufferedInputStream(socket.getInputStream(), 1024 * 1024))
+            val msgType = dis.readInt()
+
+            when (msgType) {
+                MSG_TYPE_REQUEST -> handleIncomingRequest(socket, dis, onNotificationRequested)
+                MSG_TYPE_FILE -> {
+                    val transferId = Random().nextLong()
+                    val incomingJob = currentCoroutineContext()[Job]!!
+                    activeTransfers[transferId] = TransferHandle(
+                        socket = socket,
+                        job = incomingJob
+                    )
+                    handleIncomingTransfer(
+                        context,
+                        socket,
+                        dis,
+                        transferId,
+                        onNotificationRequested
+                    )
+                }
+
+                else -> {
+                    Log.e(TAG, "Unknown msgType=$msgType, đóng kết nối")
+                    socket.close()
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Lỗi handleIncomingConnection", e)
+            try {
+                socket.close()
+            } catch (_: Exception) {
+            }
         }
-        // Handle sẽ được assign đầy đủ bên trong _sendFileSingle sau khi connect
     }
 
+    // ==================== REQUEST HANDSHAKE (bên nhận) ====================
+
+    private suspend fun handleIncomingRequest(
+        socket: Socket,
+        dis: DataInputStream,
+        onNotificationRequested: (title: String, body: String) -> Unit
+    ) {
+        var accepted = false
+        val requestId = Random().nextLong()
+        try {
+            val metaLength = dis.readInt()
+            if (metaLength <= 0 || metaLength > 1024 * 1024) throw IOException("Kích thước metadata không hợp lệ")
+            val metaBytes = ByteArray(metaLength)
+            dis.readFully(metaBytes)
+            val metaStr = String(metaBytes, Charsets.UTF_8)
+
+            val parts = metaStr.split("|")
+            val senderName = parts.getOrNull(0) ?: "Thiết bị"
+            val totalFiles = parts.getOrNull(1)?.toIntOrNull() ?: 1
+            val senderIp = socket.inetAddress.hostAddress ?: ""
+            val senderPort = socket.port
+
+            val deferred = CompletableDeferred<Boolean>()
+            pendingRequests[requestId] = PendingRequest(deferred)
+
+            _incomingConnectionRequest.tryEmit(
+                TargetDevice(
+                    name = senderName,
+                    ipAddress = senderIp,
+                    port = senderPort,
+                    from = ScanMode.WIFI,
+                    totalFiles = totalFiles,
+                    requestId = requestId,
+                    lastSeen = System.currentTimeMillis(),
+                )
+            )
+
+            onNotificationRequested("Yêu cầu nhận file", "$senderName muốn gửi $totalFiles file")
+            Log.d(
+                TAG,
+                "Nhận request id=$requestId từ $senderName ($senderIp), totalFiles=$totalFiles"
+            )
+
+            accepted = try {
+                withTimeout(REQUEST_TIMEOUT_MS) { deferred.await() }
+            } catch (e: TimeoutCancellationException) {
+                Log.d(TAG, "Request id=$requestId timeout — auto reject")
+                false
+            }
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Lỗi xử lý request id=$requestId", e)
+            accepted = false
+        } finally {
+            // Phản hồi cho sender
+            try {
+                val bos = BufferedOutputStream(socket.getOutputStream())
+                val dos = DataOutputStream(bos)
+                dos.writeInt(if (accepted) RESPONSE_ACCEPT else RESPONSE_REJECT)
+                dos.flush()
+            } catch (e: Exception) {
+                Log.e(TAG, "Lỗi gửi response request id=$requestId", e)
+            }
+            pendingRequests.remove(requestId)
+            try {
+                socket.close()
+            } catch (e: Exception) {
+            }
+        }
+    }
+
+    /**
+     * Người dùng đồng ý nhận file — gọi từ MethodChannel "acceptRequest"
+     */
+    fun acceptRequest(requestId: Long) {
+        Log.d(TAG, "acceptRequest id=$requestId")
+        pendingRequests[requestId]?.deferred?.complete(true)
+            ?: Log.w(TAG, "acceptRequest: không tìm thấy requestId=$requestId (có thể đã timeout)")
+    }
+
+    /**
+     * Người dùng từ chối / hủy request — gọi từ MethodChannel "cancelRequest"
+     */
+    fun cancelRequest(requestId: Long) {
+        Log.d(TAG, "cancelRequest id=$requestId")
+        pendingRequests[requestId]?.deferred?.complete(false)
+            ?: Log.w(TAG, "cancelRequest: không tìm thấy requestId=$requestId (có thể đã timeout)")
+    }
+
+    // ==================== SEND FILE ====================
 
     // Gửi NHIỀU file đến NHIỀU thiết bị với 2 mode: SEQUENTIAL hoặc PARALLEL
-//
-// SEQUENTIAL: gửi lần lượt từng thiết bị, mỗi thiết bị gửi lần lượt từng file
-// PARALLEL  : gửi song song tất cả thiết bị, mỗi thiết bị vẫn gửi lần lượt từng file của nó
+    //
+    // PHASE 1: Gửi REQUEST (xin phép) tới TẤT CẢ thiết bị SONG SONG. Kết quả
+    //          accept/reject của từng thiết bị được emit ngay qua sendRequestResult.
+    // PHASE 2: Chỉ thiết bị ACCEPT mới được gửi file, theo SendMode đã chọn.
+    //          Thiết bị REJECT/timeout -> báo lỗi toàn bộ file ngay, không gửi gì.
     fun requestSendFileToMultiple(
         context: Context,
         devices: List<TargetDevice>,
-        fileUris: List<Uri>,
+        filePaths: List<String>,
         senderName: String,
         mode: SendMode = SendMode.SEQUENTIAL,
-        onEachFileDone: (device: TargetDevice, fileUri: Uri, success: Boolean, errorMsg: String?) -> Unit = { _, _, _, _ -> },
-        onEachDeviceDone: (device: TargetDevice, results: Map<Uri, Boolean>) -> Unit = { _, _ -> },
-        onAllDone: (results: Map<TargetDevice, Map<Uri, Boolean>>) -> Unit = {},
+        onEachFileDone: (device: TargetDevice, filePath: String, success: Boolean, errorMsg: String?) -> Unit = { _, _, _, _ -> },
+        onEachDeviceDone: (device: TargetDevice, results: Map<String, Boolean>) -> Unit = { _, _ -> },
+        onAllDone: (results: Map<TargetDevice, Map<String, Boolean>>) -> Unit = {},
     ) {
-        CoroutineScope(Dispatchers.IO).launch {
-            val allResults = mutableMapOf<TargetDevice, Map<Uri, Boolean>>()
+        Log.d(TAG, "requestSendFileToMultiple: devices=$devices, filePaths=$filePaths")
 
+        CoroutineScope(Dispatchers.IO).launch {
+            val totalFiles = filePaths.size
+            val allResults = mutableMapOf<TargetDevice, Map<String, Boolean>>()
+
+            // ===== PHASE 1: Gửi REQUEST tới TẤT CẢ thiết bị song song =====
+            val handshakeResults = devices.map { device ->
+                async {
+                    val accepted = requestHandshake(device, senderName, totalFiles)
+                    _sendRequestResult.tryEmit(SendRequestResult(device, accepted))
+                    Log.d(TAG, "Request tới ${device.name}: accepted=$accepted")
+                    device to accepted
+                }
+            }.awaitAll()
+
+            val acceptedDevices = mutableListOf<TargetDevice>()
+
+            // Thiết bị reject/timeout -> huỷ ngay, không gửi file
+            handshakeResults.forEach { (device, accepted) ->
+                if (!accepted) {
+                    Log.d(TAG, "Thiết bị ${device.name} từ chối hoặc không phản hồi request")
+                    val results = filePaths.associateWith { false }
+                    allResults[device] = results
+                    results.forEach { (fp, ok) ->
+                        onEachFileDone(device, fp, ok, "Thiết bị từ chối hoặc không phản hồi")
+                    }
+                    onEachDeviceDone(device, results)
+                } else {
+                    acceptedDevices.add(device)
+                }
+            }
+
+            // ===== PHASE 2: Gửi file cho các thiết bị đã ACCEPT =====
             when (mode) {
                 SendMode.SEQUENTIAL -> {
-                    // Lần lượt từng thiết bị — đợi thiết bị này gửi hết toàn bộ file rồi mới sang thiết bị kế
-                    for (device in devices) {
-                        val deviceResults = _sendFilesToDevice(
-                            context, device, fileUris, senderName, onEachFileDone
-                        )
+                    for (device in acceptedDevices) {
+                        val deviceResults =
+                            _sendFilesToDevice(device, filePaths, senderName, onEachFileDone)
                         allResults[device] = deviceResults
                         onEachDeviceDone(device, deviceResults)
                         Log.d(TAG, "SEQUENTIAL: xong thiết bị ${device.name}")
@@ -468,12 +618,10 @@ object TransferEngine {
                 }
 
                 SendMode.PARALLEL -> {
-                    // Song song tất cả thiết bị — mỗi thiết bị tự gửi lần lượt các file của mình
-                    val jobs = devices.map { device ->
+                    val jobs = acceptedDevices.map { device ->
                         async {
-                            val deviceResults = _sendFilesToDevice(
-                                context, device, fileUris, senderName, onEachFileDone
-                            )
+                            val deviceResults =
+                                _sendFilesToDevice(device, filePaths, senderName, onEachFileDone)
                             onEachDeviceDone(device, deviceResults)
                             device to deviceResults
                         }
@@ -481,7 +629,7 @@ object TransferEngine {
                     jobs.awaitAll().forEach { (device, results) ->
                         allResults[device] = results
                     }
-                    Log.d(TAG, "PARALLEL: tất cả ${devices.size} thiết bị đã xong")
+                    Log.d(TAG, "PARALLEL: tất cả ${acceptedDevices.size} thiết bị đã xong")
                 }
             }
 
@@ -489,27 +637,28 @@ object TransferEngine {
         }
     }
 
-    // Gửi lần lượt danh sách file cho 1 thiết bị — trả về Map<Uri, Boolean> kết quả từng file
+    // Gửi lần lượt danh sách file cho 1 thiết bị (ĐÃ accept ở Phase 1, không handshake lại)
     private suspend fun _sendFilesToDevice(
-        context: Context,
         device: TargetDevice,
-        fileUris: List<Uri>,
+        filePaths: List<String>,
         senderName: String,
-        onEachFileDone: (device: TargetDevice, fileUri: Uri, success: Boolean, errorMsg: String?) -> Unit,
-    ): Map<Uri, Boolean> {
-        val results = mutableMapOf<Uri, Boolean>()
+        onEachFileDone: (device: TargetDevice, filePath: String, success: Boolean, errorMsg: String?) -> Unit,
+    ): Map<String, Boolean> {
+        val results = mutableMapOf<String, Boolean>()
+        val totalFiles = filePaths.size
 
-        for (fileUri in fileUris) {
+        filePaths.forEachIndexed { index, filePath ->
             val transferId = Random().nextLong()
             val latch = CompletableDeferred<Boolean>()
 
             coroutineScope {
                 launch {
                     _sendFileSingle(
-                        context, device, fileUri, senderName, transferId
+                        device, filePath, senderName, transferId,
+                        fileIndex = index, totalFiles = totalFiles
                     ) { ok, error ->
-                        results[fileUri] = ok
-                        onEachFileDone(device, fileUri, ok, error)
+                        results[filePath] = ok
+                        onEachFileDone(device, filePath, ok, error)
                         latch.complete(ok)
                     }
                 }
@@ -521,23 +670,78 @@ object TransferEngine {
         return results
     }
 
-    // Core logic gửi 1 file — tái sử dụng cho cả single và multi
-    private suspend fun _sendFileSingle(
-        context: Context,
+    // Gửi request "xin phép" tới thiết bị đích — trả về true nếu được chấp nhận
+    private suspend fun requestHandshake(
         device: TargetDevice,
-        fileUri: Uri,
+        senderName: String,
+        totalFiles: Int
+    ): Boolean {
+        var socket: Socket? = null
+        return try {
+            socket = Socket()
+            socket.tcpNoDelay = true
+            withContext(Dispatchers.IO) {
+                socket.connect(InetSocketAddress(device.ipAddress, device.port), 10000)
+            }
+            socket.soTimeout = (REQUEST_TIMEOUT_MS + 5000L).toInt()
+
+            withContext(Dispatchers.IO) {
+                val bos = BufferedOutputStream(socket.getOutputStream())
+                val dos = DataOutputStream(bos)
+                dos.writeInt(MSG_TYPE_REQUEST)
+
+                val metaStr = "$senderName|$totalFiles"
+                val metaBytes = metaStr.toByteArray(Charsets.UTF_8)
+                dos.writeInt(metaBytes.size)
+                dos.write(metaBytes)
+                dos.flush()
+
+                val dis = DataInputStream(socket.getInputStream())
+                val response = dis.readInt()
+                Log.d(TAG, "Handshake với ${device.name}: response=$response")
+                response == RESPONSE_ACCEPT
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Handshake lỗi với ${device.name}", e)
+            false
+        } finally {
+            try {
+                socket?.close()
+            } catch (e: Exception) {
+            }
+        }
+    }
+
+    // Core logic gửi 1 file — đọc trực tiếp từ filePath (đường dẫn tuyệt đối)
+    private suspend fun _sendFileSingle(
+        device: TargetDevice,
+        filePath: String,
         senderName: String,
         transferId: Long,
+        fileIndex: Int = 0,
+        totalFiles: Int = 1,
         onDone: (success: Boolean, errorMsg: String?) -> Unit
     ) {
         var socket: Socket? = null
         var bos: BufferedOutputStream? = null
-        var bis: BufferedInputStream? = null
+        var fis: FileInputStream? = null
 
         try {
-            val (fileName, fileSize) = getUriDetails(context, fileUri)
-            if (fileName == null || fileSize <= 0) {
-                throw IOException("Không thể đọc thông tin file được chọn.")
+            Log.d(
+                TAG,
+                "_sendFileSingle: device=$device, filePath=$filePath, index=$fileIndex/$totalFiles"
+            )
+
+            val file = File(filePath)
+            if (!file.exists()) {
+                throw IOException("File không tồn tại: $filePath")
+            }
+
+            val fileName = file.name
+            val fileSize = file.length()
+
+            if (fileName.isEmpty() || fileSize <= 0) {
+                throw IOException("Không thể đọc thông tin file được chọn: fileName=$fileName, fileSize=$fileSize")
             }
 
             emitTransfer(
@@ -557,7 +761,9 @@ object TransferEngine {
             socket = Socket()
             socket.tcpNoDelay = true
             socket.sendBufferSize = 1024 * 1024
-            socket.connect(InetSocketAddress(device.ipAddress, device.port), 10000)
+            withContext(Dispatchers.IO) {
+                socket.connect(InetSocketAddress(device.ipAddress, device.port), 10000)
+            }
 
             // Track handle sau khi connect thành công
             activeTransfers[transferId] = TransferHandle(
@@ -567,17 +773,20 @@ object TransferEngine {
 
             emitTransfer(_transfers.value[transferId]!!.copy(status = "TRANSFERRING"))
 
-            val metaStr = "$fileName|$fileSize|$senderName"
-            val metaBytes = metaStr.toByteArray(Charsets.UTF_8)
-            bos = BufferedOutputStream(socket.getOutputStream(), 1024 * 1024)
+            bos = BufferedOutputStream(withContext(Dispatchers.IO) {
+                socket.getOutputStream()
+            }, 1024 * 1024)
             val dos = DataOutputStream(bos)
+
+            dos.writeInt(MSG_TYPE_FILE)
+            // ✅ Kèm fileIndex|totalFiles để bên nhận biết tổng số file của batch
+            val metaStr = "$fileName|$fileSize|$senderName|$fileIndex|$totalFiles"
+            val metaBytes = metaStr.toByteArray(Charsets.UTF_8)
             dos.writeInt(metaBytes.size)
             dos.write(metaBytes)
             dos.flush()
 
-            val rawInputStream = context.contentResolver.openInputStream(fileUri)
-                ?: throw IOException("Không thể mở file được chọn.")
-            bis = BufferedInputStream(rawInputStream, 1024 * 1024)
+            fis = FileInputStream(file)
 
             val buffer = ByteArray(BUFFER_SIZE)
             var bytesRead: Int
@@ -586,7 +795,7 @@ object TransferEngine {
             var bytesSavedSinceLastUpdate = 0L
 
             while (currentCoroutineContext().isActive) {
-                bytesRead = bis.read(buffer)
+                bytesRead = fis.read(buffer)
                 if (bytesRead == -1) break
 
                 bos.write(buffer, 0, bytesRead)
@@ -634,7 +843,7 @@ object TransferEngine {
         } finally {
             activeTransfers.remove(transferId)
             try {
-                bis?.close()
+                fis?.close()
             } catch (e: Exception) {
             }
             try {
@@ -655,18 +864,16 @@ object TransferEngine {
     private suspend fun handleIncomingTransfer(
         context: Context,
         socket: Socket,
+        dis: DataInputStream,
         transferId: Long,
         onNotificationRequested: (title: String, body: String) -> Unit
     ) {
-        var dis: DataInputStream? = null
         var bos: BufferedOutputStream? = null
         var senderName = "Thiết bị"
         var targetUri: Uri? = null
 
         try {
-            socket.tcpNoDelay = true
             socket.receiveBufferSize = 1024 * 1024
-            dis = DataInputStream(BufferedInputStream(socket.getInputStream(), 1024 * 1024))
 
             val metaLength = dis.readInt()
             if (metaLength <= 0 || metaLength > 1024 * 1024) throw IOException("Kích thước metadata không hợp lệ")
@@ -680,8 +887,13 @@ object TransferEngine {
             val fileName = parts[0]
             val fileSize = parts[1].toLongOrNull() ?: 0L
             senderName = parts[2]
+            val fileIndex = parts.getOrNull(3)?.toIntOrNull() ?: 0
+            val totalFiles = parts.getOrNull(4)?.toIntOrNull() ?: 1
 
-            Log.d(TAG, "Nhận file: $fileName ($fileSize bytes) từ $senderName")
+            Log.d(
+                TAG,
+                "Nhận file: $fileName ($fileSize bytes) từ $senderName [${fileIndex + 1}/$totalFiles]"
+            )
             onNotificationRequested("Nhận diện gửi file", "$senderName đang gửi: $fileName")
 
             val lowercaseName = fileName.lowercase(Locale.ROOT)
@@ -793,7 +1005,7 @@ object TransferEngine {
             } catch (e: Exception) {
             }
             try {
-                dis?.close()
+                dis.close()
             } catch (e: Exception) {
             }
             try {
@@ -909,23 +1121,6 @@ object TransferEngine {
         }
     }
 
-    fun getUriDetails(context: Context, uri: Uri): Pair<String?, Long> {
-        var name: String? = null
-        var size = 0L
-        if (uri.scheme == ContentResolver.SCHEME_CONTENT) {
-            context.contentResolver.query(uri, null, null, null, null)?.use {
-                if (it.moveToFirst()) {
-                    val nameIndex = it.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                    if (nameIndex != -1) name = it.getString(nameIndex)
-                    val sizeIndex = it.getColumnIndex(OpenableColumns.SIZE)
-                    if (sizeIndex != -1) size = it.getLong(sizeIndex)
-                }
-            }
-        }
-        if (name == null) name = uri.path?.substringAfterLast('/')
-        return Pair(name, size)
-    }
-
     private fun saveMediaToGallery(context: Context, file: File) {
         val lowercaseName = file.name.lowercase(Locale.ROOT)
         val isImage = lowercaseName.run {
@@ -1010,5 +1205,3 @@ object TransferEngine {
         return file
     }
 }
-
-

@@ -1,168 +1,213 @@
-import 'dart:async';
 import 'package:flutter/services.dart';
 import 'package:mytransferapp/enum/send_mode_status.dart';
-import 'package:mytransferapp/src/domain/entities/bluetooth_device.dart';
-import 'package:mytransferapp/src/domain/entities/device_infor.dart';
-import 'package:mytransferapp/src/domain/entities/network_info.dart';
+import 'package:mytransferapp/src/domain/entities/device_entity/current_device.dart';
+import 'package:mytransferapp/src/domain/entities/device_entity/target_device.dart';
+import 'package:mytransferapp/src/domain/entities/send_request_result.dart';
 import 'package:mytransferapp/src/domain/entities/transfer_engine_state.dart';
 import 'package:mytransferapp/src/domain/entities/transfer_state.dart';
-import 'package:mytransferapp/src/domain/entities/wifi_device.dart';
 
 class TransferService {
   TransferService._();
+
   static final TransferService instance = TransferService._();
 
-  // ── Channels ────────────────────────────────────────────────────────
+  // ─────────────────────────────────────────────
+  // Channels
+  // ─────────────────────────────────────────────
+
   static const _method = MethodChannel('com.supertransfer/method');
+
   static const _chTransfer = EventChannel('com.supertransfer/event.transfer');
+
   static const _chWifi = EventChannel('com.supertransfer/event.wifi_devices');
-  static const _chBluetooth = EventChannel(
-    'com.supertransfer/event.bt_devices',
+
+  static const _chIncomingRequest = EventChannel(
+    'com.supertransfer/event.incoming_request',
+  );
+  static const EventChannel _chSendRequestResult = EventChannel(
+    'com.supertransfer/event.send_request_result',
   );
 
-  // ── Streams (lazy broadcast) ─────────────────────────────────────────
-  Stream<TransferState?> get transferStream =>
-      _chTransfer.receiveBroadcastStream().map((e) {
-        if (e == null) return null;
-        return TransferState.fromMap(Map<String, dynamic>.from(e as Map));
+  // Stream<Map<String, dynamic>> get btDevicesStream =>
+  //     _chBtDevices.receiveBroadcastStream().map((e) => Map<String, dynamic>.from(e as Map));
+
+  Stream<SendRequestResult> get sendRequestResultStream =>
+      _chSendRequestResult.receiveBroadcastStream().map((e) {
+        return SendRequestResult.fromMap(Map<String, dynamic>.from(e as Map));
       });
 
-  /// Emit toàn bộ danh sách WiFi devices mỗi khi có thay đổi
-  Stream<List<WifiDevice>> get wifiDevicesStream =>
-      _chWifi.receiveBroadcastStream().map((e) {
-        final list = e as List? ?? [];
+  // ─────────────────────────────────────────────
+  // Event Streams
+  // ─────────────────────────────────────────────
+
+  Stream<List<TransferState>> get transferStream =>
+      _chTransfer.receiveBroadcastStream().map((event) {
+        final list = event as List? ?? [];
+
         return list
-            .map((d) => WifiDevice.fromMap(Map<String, dynamic>.from(d as Map)))
+            .map(
+              (e) => TransferState.fromMap(Map<String, dynamic>.from(e as Map)),
+            )
             .toList();
       });
 
-  /// Emit từng Bluetooth device khi scan tìm được
-  Stream<BluetoothDevice> get bluetoothDeviceStream => _chBluetooth
-      .receiveBroadcastStream()
-      .map((e) => BluetoothDevice.fromMap(Map<String, dynamic>.from(e as Map)));
+  Stream<List<TargetDevice>> get wifiDevicesStream =>
+      _chWifi.receiveBroadcastStream().map((event) {
+        final list = event as List? ?? [];
+        return list.map((e) {
+          print("wifiDevicesStream item = $e");
+          return TargetDevice.fromMap(Map<String, dynamic>.from(e as Map));
+        }).toList();
+      });
 
-  Stream<DeviceInfo> get incomingRequestStream {
-    return EventChannel(
-      'com.supertransfer/event.incoming_request',
-    ).receiveBroadcastStream().map(
-      (event) => DeviceInfo.fromMap(Map<String, dynamic>.from(event as Map)),
-    );
-  }
+  // Stream<BluetoothDevice> get bluetoothDeviceStream =>
+  //     _chBluetooth.receiveBroadcastStream().map(
+  //           (event) => BluetoothDevice.fromMap(
+  //             Map<String, dynamic>.from(event as Map),
+  //           ),
+  //         );
 
-  // ── Network info ─────────────────────────────────────────────────────
-  /// Bật server nhận file (gọi tự động khi mở app bên Android,
-  /// nhưng Flutter cũng có thể gọi lại nếu cần)
-  Future<void> startReceiveServer() =>
-      _method.invokeMethod('startReceiveServer');
+  Stream<TargetDevice> get incomingRequestStream =>
+      _chIncomingRequest.receiveBroadcastStream().map((e) {
+        print("incomingRequestStream item = $e");
+        return TargetDevice.fromMap(Map<String, dynamic>.from(e as Map));
+      });
 
-  Future<String> getLocalIpAddress() async =>
-      await _method.invokeMethod<String>('getLocalIpAddress') ?? '';
+  // ─────────────────────────────────────────────
+  // Device Info
+  // ─────────────────────────────────────────────
 
-  Future<String> getDeviceName() async =>
-      await _method.invokeMethod<String>('getDeviceName') ?? '';
-
-  Future<NetworkInfo> getNetworkInfo() async {
+  Future<CurrentDevice> getCurrentDeviceInfo() async {
     final map = await _method.invokeMapMethod<String, dynamic>(
-      'getNetworkInfo',
+      'getCurrentDeviceInfo',
     );
-    return NetworkInfo.fromMap(map ?? {});
+
+    return CurrentDevice.fromMap(map ?? {});
   }
 
   Future<TransferEngineState> getTransferEngineStatus() async {
     final map = await _method.invokeMapMethod<String, dynamic>(
       'getTransferEngineStatus',
     );
+
     return TransferEngineState.fromMap(map ?? {});
   }
 
-  // ── Permission ────────────────────────────────────────────────────────
+  // ─────────────────────────────────────────────
+  // Permissions
+  // ─────────────────────────────────────────────
 
-  Future<bool> checkPermissions() async =>
-      await _method.invokeMethod<bool>('checkPermissions') ?? false;
+  Future<bool> checkPermissions() async {
+    return await _method.invokeMethod<bool>('checkPermissions') ?? false;
+  }
 
-  Future<bool> requestSendFileToMultiple({
-    required List<DeviceInfo> devices,
+  Future<bool> requestPermissions() async {
+    return await _method.invokeMethod<bool>('requestPermissions') ?? false;
+  }
+
+  // ─────────────────────────────────────────────
+  // WiFi Scan
+  // ─────────────────────────────────────────────
+
+  Future<void> startWifiScan({int timeoutMs = 10000}) {
+    return _method.invokeMethod('startWifiScan', {'timeoutMs': timeoutMs});
+  }
+
+  Future<void> stopWifiScan() {
+    return _method.invokeMethod('stopWifiScan');
+  }
+
+  // ─────────────────────────────────────────────
+  // Bluetooth
+  // ─────────────────────────────────────────────
+
+  Future<bool> checkBluetoothEnabled() async {
+    return await _method.invokeMethod<bool>('checkBluetoothEnabled') ?? false;
+  }
+
+  Future<void> requestEnableBluetooth() {
+    return _method.invokeMethod('requestEnableBluetooth');
+  }
+
+  Future<void> startBluetoothScan({int timeoutMs = 10000}) {
+    return _method.invokeMethod('startBluetoothScan', {'timeoutMs': timeoutMs});
+  }
+
+  Future<void> stopBluetoothScan() {
+    return _method.invokeMethod('stopBluetoothScan');
+  }
+
+  // ─────────────────────────────────────────────
+  // Transfer Service
+  // ─────────────────────────────────────────────
+
+  Future<void> startReceiveServer() {
+    return _method.invokeMethod('startReceiveServer');
+  }
+
+  Future<void> stopReceiveServer() {
+    return _method.invokeMethod('stopReceiveServer');
+  }
+
+  // ─────────────────────────────────────────────
+  // Send Files
+  // ─────────────────────────────────────────────
+
+  Future<dynamic> requestSendFileToMultiple({
+    required List<TargetDevice> devices,
     required List<String> listFilePath,
     SendMode mode = SendMode.SEQUENTIAL,
   }) async {
-    final data = {
-      "devices": devices,
-      "listFilePath": listFilePath,
-      "mode": mode,
-    };
-
-    return await _method.invokeMethod<bool>(
-          'requestSendFileToMultiple',
-          data,
-        ) ??
-        false;
+    return _method.invokeMethod('requestSendFileToMultiple', {
+      'devices': devices.map((e) => e.toMap()).toList(),
+      'listFilePath': listFilePath,
+      'sendMode': mode.name.toUpperCase(),
+    });
   }
 
-  /// Trả về true nếu user cấp đủ quyền
-  Future<bool> requestPermissions() async =>
-      await _method.invokeMethod<bool>('requestPermissions') ?? false;
-
-  // ── WiFi scan ─────────────────────────────────────────────────────────
-
-  /// Bắt đầu scan — kết quả realtime qua [wifiDevicesStream]
-  Future<void> startWifiScan({int timeoutMs = 10000}) {
-    final data = {"timeoutMs": timeoutMs};
-    return _method.invokeMethod('startWifiScan', data);
+  Future<void> sendFileViaBluetooth({required String filePath}) {
+    return _method.invokeMethod('sendFileViaBluetooth', {'filePath': filePath});
   }
 
-  Future<void> stopWifiScan() => _method.invokeMethod('stopWifiScan');
-
-  // ── Bluetooth ─────────────────────────────────────────────────────────
-
-  Future<bool> checkBluetoothEnabled() async =>
-      await _method.invokeMethod<bool>('checkBluetoothEnabled') ?? false;
-
-  /// Mở dialog hệ thống yêu cầu bật BT
-  Future<void> requestEnableBluetooth() =>
-      _method.invokeMethod('requestEnableBluetooth');
-
-  /// Bắt đầu scan BT — kết quả realtime qua [bluetoothDeviceStream]
-  Future<void> startBluetoothScan({int timeoutMs = 10000}) {
-    final data = {"timeoutMs": timeoutMs};
-    return _method.invokeMethod('startBluetoothScan', data);
+  Future<void> cancelTransfer({int? transferId}) {
+    return _method.invokeMethod('cancelTransfer', {'transferId': transferId});
   }
 
-  Future<void> stopBluetoothScan() => _method.invokeMethod('stopBluetoothScan');
+  Future<void> acceptRequest(int requestId) async {
+    try {
+      await _method.invokeMethod('acceptRequest', {'requestId': requestId});
+    } catch (e) {
+      print('acceptRequest error: $e');
+    }
+  }
 
-  // ── Transfer ──────────────────────────────────────────────────────────
+  Future<void> cancelRequest(int requestId) async {
+    try {
+      await _method.invokeMethod('cancelRequest', {'requestId': requestId});
+    } catch (e) {
+      print('cancelRequest error: $e');
+    }
+  }
+  // ─────────────────────────────────────────────
+  // Utility
+  // ─────────────────────────────────────────────
 
-  Future<void> stopReceiveServer() => _method.invokeMethod('stopReceiveServer');
+  Future<void> openFile({required String filePath, required String fileName}) {
+    return _method.invokeMethod('openFile', {
+      'filePath': filePath,
+      'fileName': fileName,
+    });
+  }
 
-  /// Gửi file qua WiFi đến [ipAddress]
-  /// [filePath] là content URI hoặc absolute path
-  /// Tiến trình theo dõi qua [transferStream]
-  Future<void> sendFileToIpAddress({
-    required String ipAddress,
-    required String filePath,
-  }) => _method.invokeMethod('sendFileToIpAddress', {
-    'ipAddress': ipAddress,
-    'filePath': filePath,
-  });
+  Future<void> openHotspotSettings() {
+    return _method.invokeMethod('openHotspotSettings');
+  }
 
-  /// Gửi file qua Bluetooth (mở share sheet hệ thống)
-  Future<void> sendFileViaBluetooth({required String filePath}) =>
-      _method.invokeMethod('sendFileViaBluetooth', {'filePath': filePath});
+  Future<void> openWifiSettings() {
+    return _method.invokeMethod('openWifiSettings');
+  }
 
-  Future<void> cancelTransfer() => _method.invokeMethod('cancelTransfer');
-
-  // ── Utility ───────────────────────────────────────────────────────────
-
-  Future<void> openFile({required String filePath, required String fileName}) =>
-      _method.invokeMethod('openFile', {
-        'filePath': filePath,
-        'fileName': fileName,
-      });
-
-  Future<void> openHotspotSettings() =>
-      _method.invokeMethod('openHotspotSettings');
-
-  Future<void> openWifiSettings() => _method.invokeMethod('openWifiSettings');
-
-  Future<void> openBluetoothSettings() =>
-      _method.invokeMethod('openBluetoothSettings');
+  Future<void> openBluetoothSettings() {
+    return _method.invokeMethod('openBluetoothSettings');
+  }
 }

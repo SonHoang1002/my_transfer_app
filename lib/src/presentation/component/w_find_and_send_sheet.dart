@@ -5,9 +5,9 @@ import 'package:mytransferapp/core/my_color.dart';
 import 'package:mytransferapp/core/my_constant.dart';
 import 'package:mytransferapp/dao/home_dao.dart';
 import 'package:mytransferapp/main.dart';
-import 'package:mytransferapp/src/domain/entities/network_info.dart';
+import 'package:mytransferapp/src/domain/entities/device_entity/current_device.dart';
+import 'package:mytransferapp/src/domain/entities/device_entity/target_device.dart';
 import 'package:mytransferapp/src/domain/entities/transfer_state.dart';
-import 'package:mytransferapp/src/domain/entities/wifi_device.dart';
 
 class WFindAndSendSheet extends StatefulWidget {
   final MyDAO myDAO;
@@ -18,20 +18,21 @@ class WFindAndSendSheet extends StatefulWidget {
 }
 
 class _WFindAndSendSheetState extends State<WFindAndSendSheet> {
-  late Stream<List<WifiDevice>> deviceSub;
-  late NetworkInfo networkInfo;
+  late Stream<List<TargetDevice>> deviceSub;
+  late CurrentDevice currentDevice;
   bool _isLoading = true, _requesting = false;
 
-  ValueNotifier<List<WifiDevice>> vListRequestWifiDevice = ValueNotifier([]);
-  late Stream<TransferState?> listTransferState;
+  ValueNotifier<List<TargetDevice>> vListRequestWifiDevice = ValueNotifier([]);
+  late Stream<List<TransferState>?> listTransferState;
   @override
   void initState() {
+    print("widget.myDAO.getlistSendFilePath = ${widget.myDAO.toString()}");
     deviceSub = transferInstance.wifiDevicesStream;
     listTransferState = transferInstance.transferStream;
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((timeStamp) async {
-      networkInfo = await transferInstance.getNetworkInfo();
-      transferInstance.startWifiScan();
+      currentDevice = await transferInstance.getCurrentDeviceInfo();
+      await transferInstance.startWifiScan();
       setState(() {
         _isLoading = false;
       });
@@ -49,11 +50,11 @@ class _WFindAndSendSheetState extends State<WFindAndSendSheet> {
     setState(() {
       _requesting = true;
     });
+
     transferInstance.requestSendFileToMultiple(
-      devices: vListRequestWifiDevice,
+      devices: vListRequestWifiDevice.value,
       listFilePath: widget.myDAO.getlistSendFilePath,
     );
-    
   }
 
   @override
@@ -143,12 +144,12 @@ class _WFindAndSendSheetState extends State<WFindAndSendSheet> {
                             if (!snapshot.hasData) {
                               return SizedBox();
                             }
-                            List<WifiDevice> wifiDevices = snapshot.data!.where(
-                              (element) {
-                                return element.ipAddress !=
-                                    networkInfo.ipAddress;
-                              },
-                            ).toList();
+                            List<TargetDevice> wifiDevices = snapshot.data!
+                                .where((element) {
+                                  return element.ipAddress !=
+                                      currentDevice.ipAddress;
+                                })
+                                .toList();
                             return ValueListenableBuilder(
                               valueListenable: vListRequestWifiDevice,
                               builder: (context, value, _) {
@@ -156,13 +157,14 @@ class _WFindAndSendSheetState extends State<WFindAndSendSheet> {
                                   scrollDirection: Axis.horizontal,
                                   itemCount: wifiDevices.length,
                                   itemBuilder: (context, index) {
-                                    final data = wifiDevices[index];
+                                    final targetDevice = wifiDevices[index];
                                     final indexSelected = value.indexWhere(
                                       (element) =>
-                                          element.ipAddress == data.ipAddress,
+                                          element.ipAddress ==
+                                          targetDevice.ipAddress,
                                     );
                                     return _buildDeviceItem(
-                                      data: data,
+                                      targetDevice: targetDevice,
                                       onTap: () {
                                         if (_requesting) return;
                                         if (indexSelected != -1) {
@@ -171,14 +173,14 @@ class _WFindAndSendSheetState extends State<WFindAndSendSheet> {
                                                   .where(
                                                     (element) =>
                                                         element.ipAddress !=
-                                                        data.ipAddress,
+                                                        targetDevice.ipAddress,
                                                   )
                                                   .toList();
                                           return;
                                         }
                                         vListRequestWifiDevice.value = [
                                           ...vListRequestWifiDevice.value,
-                                          data,
+                                          targetDevice,
                                         ];
                                       },
                                       indexSelected: indexSelected,
@@ -388,7 +390,7 @@ class _WFindAndSendSheetState extends State<WFindAndSendSheet> {
   }
 
   Widget _buildDeviceItem({
-    required WifiDevice data,
+    required TargetDevice targetDevice,
     required void Function() onTap,
     required int indexSelected,
   }) {
@@ -408,6 +410,14 @@ class _WFindAndSendSheetState extends State<WFindAndSendSheet> {
                     width: 60,
                     height: 60,
                     decoration: BoxDecoration(color: grey),
+                  ),
+                  Positioned.fill(
+                    child: Center(
+                      child: Text(
+                        targetDevice.getScanModeLabel,
+                        style: TextStyle(color: white),
+                      ),
+                    ),
                   ),
                   Positioned.fill(
                     child: Opacity(
@@ -438,7 +448,7 @@ class _WFindAndSendSheetState extends State<WFindAndSendSheet> {
               ),
             ),
             Text(
-              data.name,
+              targetDevice.name,
               style: TextStyle(
                 fontSize: 15,
                 fontWeight: FontWeight.bold,

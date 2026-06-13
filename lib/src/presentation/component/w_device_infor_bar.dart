@@ -4,7 +4,8 @@ import 'package:mytransferapp/core/my_color.dart';
 import 'package:mytransferapp/core/my_constant.dart';
 import 'package:mytransferapp/dao/home_dao.dart';
 import 'package:mytransferapp/main.dart';
-import 'package:mytransferapp/src/domain/entities/network_info.dart';
+import 'package:mytransferapp/src/domain/entities/device_entity/current_device.dart';
+import 'package:mytransferapp/src/domain/entities/device_entity/target_device.dart';
 
 class WDeviceInfor extends StatefulWidget {
   final List<SendFileData> listSelectedFile;
@@ -34,7 +35,7 @@ class _WDeviceInforState extends State<WDeviceInfor>
   List<SendFileData> get reverseListSelectedFile =>
       widget.listSelectedFile.reversed.toList();
 
-  late NetworkInfo networkInfor;
+  late CurrentDevice currentDevice;
 
   bool _isLoading = true;
 
@@ -85,7 +86,7 @@ class _WDeviceInforState extends State<WDeviceInfor>
       if (widget.listSelectedFile.isNotEmpty) {
         _animationController.forward();
       }
-      networkInfor = await transferInstance.getNetworkInfo();
+      currentDevice = await transferInstance.getCurrentDeviceInfo();
       setState(() {
         _isLoading = false;
       });
@@ -145,7 +146,7 @@ class _WDeviceInforState extends State<WDeviceInfor>
                         mainAxisSize: MainAxisSize.max,
                         children: [
                           Text(
-                            networkInfor.deviceName,
+                            currentDevice.name,
                             style: TextStyle(
                               fontSize: 24,
                               fontWeight: FontWeight.w600,
@@ -189,9 +190,10 @@ class _WDeviceInforState extends State<WDeviceInfor>
                         ),
                       ),
                       SizedBox(height: 16),
-                      Row(
+                      Flex(
+                        direction: Axis.horizontal,
                         children: [
-                          Expanded(
+                          Flexible(
                             child: _buildActionButton(
                               label: "Cancel",
                               icon: Icons.close,
@@ -201,7 +203,19 @@ class _WDeviceInforState extends State<WDeviceInfor>
                             ),
                           ),
                           const SizedBox(width: 12),
-                          Expanded(
+                          Flexible(
+                            child: _buildActionButton(
+                              label: "Demo",
+                              icon: Icons.send,
+                              bgColor: black,
+                              textColor: white,
+                              onPressed: () {
+                                widget.data.onDemo(context);
+                              },
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Flexible(
                             child: _buildActionButton(
                               label: "Send",
                               icon: Icons.send,

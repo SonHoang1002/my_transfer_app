@@ -1,19 +1,16 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_svg/svg.dart';
 import 'package:mytransferapp/core/my_color.dart';
-import 'package:mytransferapp/core/my_constant.dart';
 import 'package:mytransferapp/main.dart';
-import 'package:mytransferapp/src/domain/entities/device_infor.dart';
-import 'package:mytransferapp/src/domain/entities/network_info.dart';
-import 'package:mytransferapp/src/domain/entities/wifi_device.dart';
+import 'package:mytransferapp/src/domain/entities/device_entity/current_device.dart';
+import 'package:mytransferapp/src/domain/entities/device_entity/target_device.dart';
 
 class WRequestSheet extends StatefulWidget {
-  final DeviceInfo deviceInfor;
+  final TargetDevice targetDevice;
   final void Function() onAccept;
   final void Function() onCancel;
   const WRequestSheet({
     super.key,
-    required this.deviceInfor,
+    required this.targetDevice,
     required this.onAccept,
     required this.onCancel,
   });
@@ -23,13 +20,13 @@ class WRequestSheet extends StatefulWidget {
 }
 
 class _WRequestSheetState extends State<WRequestSheet> {
-  late NetworkInfo networkInfo;
+  late CurrentDevice currentDevice;
   bool _isLoading = true;
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((timeStamp) async {
-      networkInfo = await transferInstance.getNetworkInfo();
+      currentDevice = await transferInstance.getCurrentDeviceInfo();
       transferInstance.startWifiScan();
       setState(() {
         _isLoading = false;
@@ -78,26 +75,26 @@ class _WRequestSheetState extends State<WRequestSheet> {
                         color: black,
                       ),
                     ),
-                    Container(
-                      height: 44,
-                      width: 44,
-                      decoration: BoxDecoration(
-                        color: black02,
-                        borderRadius: BorderRadius.circular(999),
-                      ),
-                      child: InkWell(
-                        onTap: () {
-                          Navigator.of(context).pop();
-                        },
-                        child: Center(
-                          child: SvgPicture.asset(
-                            "${PATH_ICON}ic_close.svg",
-                            height: 24,
-                            width: 24,
-                          ),
-                        ),
-                      ),
-                    ),
+                    // Container(
+                    //   height: 44,
+                    //   width: 44,
+                    //   decoration: BoxDecoration(
+                    //     color: black02,
+                    //     borderRadius: BorderRadius.circular(999),
+                    //   ),
+                    //   child: InkWell(
+                    //     onTap: () {
+                    //       Navigator.of(context).pop();
+                    //     },
+                    //     child: Center(
+                    //       child: SvgPicture.asset(
+                    //         "${PATH_ICON}ic_close.svg",
+                    //         height: 24,
+                    //         width: 24,
+                    //       ),
+                    //     ),
+                    //   ),
+                    // ),
                   ],
                 ),
               ],
@@ -114,7 +111,7 @@ class _WRequestSheetState extends State<WRequestSheet> {
     return Column(
       children: [
         Text(
-          "${widget.deviceInfor.name}send you 11000 items",
+          "${widget.targetDevice.name} send you ${widget.targetDevice.totalTargetFile} items",
           style: TextStyle(
             fontSize: 17,
             fontWeight: FontWeight.w500,
@@ -122,7 +119,7 @@ class _WRequestSheetState extends State<WRequestSheet> {
           ),
         ),
         Text(
-          "11000 items",
+          "${widget.targetDevice.totalTargetFile} items",
           style: TextStyle(
             fontSize: 15,
             fontWeight: FontWeight.w500,
@@ -155,22 +152,23 @@ class _WRequestSheetState extends State<WRequestSheet> {
     required VoidCallback onTap,
     Color textColor = white,
   }) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        width: 370,
-        height: 48,
-        decoration: BoxDecoration(
-          color: bgColor,
-          borderRadius: BorderRadius.circular(999),
-        ),
-        child: Center(
-          child: Text(
-            title,
-            style: TextStyle(
-              fontSize: 17,
-              fontWeight: FontWeight.w500,
-              color: textColor,
+    return Flexible(
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          height: 48,
+          decoration: BoxDecoration(
+            color: bgColor,
+            borderRadius: BorderRadius.circular(999),
+          ),
+          child: Center(
+            child: Text(
+              title,
+              style: TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.w500,
+                color: textColor,
+              ),
             ),
           ),
         ),
@@ -179,7 +177,7 @@ class _WRequestSheetState extends State<WRequestSheet> {
   }
 
   Widget _buildDeviceItem({
-    required WifiDevice data,
+    required TargetDevice data,
     required void Function() onTap,
     required int indexSelected,
   }) {
