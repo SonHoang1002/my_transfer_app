@@ -111,7 +111,7 @@ class _WRequestSheetState extends State<WRequestSheet> {
     return Column(
       children: [
         Text(
-          "${widget.targetDevice.name} send you ${widget.targetDevice.totalTargetFile} items",
+          "${widget.targetDevice.name} send you ${widget.targetDevice.totalFiles} items",
           style: TextStyle(
             fontSize: 17,
             fontWeight: FontWeight.w500,
@@ -119,7 +119,7 @@ class _WRequestSheetState extends State<WRequestSheet> {
           ),
         ),
         Text(
-          "${widget.targetDevice.totalTargetFile} items",
+          "${widget.targetDevice.totalFiles} items",
           style: TextStyle(
             fontSize: 15,
             fontWeight: FontWeight.w500,

@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:custom_sliding_segmented_control/custom_sliding_segmented_control.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_svg/svg.dart';
 import 'package:mytransferapp/core/my_color.dart';
 import 'package:mytransferapp/core/my_constant.dart';
@@ -31,8 +32,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   PhotoPermission _permission = PhotoPermission.checking;
   StreamSubscription<TargetDevice>? _incomingRequestSub;
 
-  StreamSubscription<List<TransferState>>? _transferSub; // ✅ thêm
+  StreamSubscription<List<TransferState>>? _transferSub;
   bool _isTransferSheetOpen = false;
+
   @override
   void initState() {
     super.initState();
@@ -55,14 +57,21 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _incomingRequestSub = transferInstance.incomingRequestStream.listen((
       deviceInfor,
     ) {
+      debugPrint('incomingRequestStream: $deviceInfor');
       if (!mounted) return;
       _showRequestSheet(deviceInfor);
+    }, onError: (e) {
+      debugPrint('incomingRequestStream error: $e');
     });
   }
 
   // ✅ Lắng nghe tiến trình transfer (cả gửi và nhận) — tự mở sheet khi có transfer mới
   void _listenTransfer() {
     _transferSub = transferInstance.transferStream.listen((transfers) {
+      debugPrint(
+          'HomeScreen transferStream: ${transfers.length} item(s) -> '
+          '${transfers.map((e) => e.toString()).join(' | ')}');
+
       if (!mounted) return;
       if (transfers.isNotEmpty && !_isTransferSheetOpen) {
         _isTransferSheetOpen = true;
@@ -78,12 +87,19 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           _isTransferSheetOpen = false;
         });
       }
+    }, onError: (e) {
+      debugPrint('HomeScreen transferStream error: $e');
     });
   }
 
   // ✅ Mở request sheet khi có request đến
   void _showRequestSheet(TargetDevice targetDevice) {
-    print("targetDevicetargetDevice = $targetDevice");
+    debugPrint('targetDevice = $targetDevice');
+    if (targetDevice.requestId == null) {
+      debugPrint(
+          '⚠️ requestId == null — accept/cancel sẽ KHÔNG hoạt động. '
+          'Kiểm tra lại TargetDevice.fromMap và native emit.');
+    }
     // Tránh mở nhiều sheet cùng lúc nếu nhiều request đến
     showModalBottomSheet(
       context: context,

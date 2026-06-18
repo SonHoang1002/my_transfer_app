@@ -8,7 +8,7 @@ class TargetDevice extends CoreDevice {
   final int lastSeen;
   final String? address;
   final String? bondState;
-  final int totalTargetFile;
+  final int totalFiles;
   final int? requestId;
 
   TargetDevice({
@@ -19,7 +19,7 @@ class TargetDevice extends CoreDevice {
     required this.lastSeen,
     required this.address,
     required this.bondState,
-    this.totalTargetFile = 0,
+    this.totalFiles = 0,
     this.requestId,
   });
 
@@ -55,16 +55,16 @@ class TargetDevice extends CoreDevice {
   }
 
   // Kiểm tra có requestId không
-  bool get hasRequestId => requestId != null ;
+  bool get hasRequestId => requestId != null;
 
   // Kiểm tra có file để gửi không
-  bool get hasFilesToSend => totalTargetFile > 0;
+  bool get hasFilesToSend => totalFiles > 0;
 
   // Format số lượng file
-  String get totalTargetFileFormatted {
-    if (totalTargetFile == 0) return "Không có file";
-    if (totalTargetFile == 1) return "1 file";
-    return "$totalTargetFile files";
+  String get totalFilesFormatted {
+    if (totalFiles == 0) return "Không có file";
+    if (totalFiles == 1) return "1 file";
+    return "$totalFiles files";
   }
 
   factory TargetDevice.fromMap(Map m) => TargetDevice(
@@ -75,7 +75,7 @@ class TargetDevice extends CoreDevice {
     lastSeen: m['lastSeen'] as int? ?? 0,
     address: m['address'] as String?,
     bondState: m['bondState'] as String?,
-    totalTargetFile: m['totalTargetFile'] as int? ?? 0,
+    totalFiles: m['totalFiles'] as int? ?? 0,
     requestId: m['requestId'] as int?,
   );
 
@@ -87,7 +87,7 @@ class TargetDevice extends CoreDevice {
     'lastSeen': lastSeen,
     'address': address,
     'bondState': bondState,
-    'totalTargetFile': totalTargetFile,
+    'totalFiles': totalFiles,
     'requestId': requestId,
   };
 
@@ -102,7 +102,7 @@ class TargetDevice extends CoreDevice {
         'isAlive: $isAlive, '
         'address: $address, '
         'bondState: $bondState, '
-        'totalTargetFile: $totalTargetFile, '
+        'totalFiles: $totalFiles, '
         'requestId: $requestId'
         '}';
   }
@@ -116,7 +116,7 @@ class TargetDevice extends CoreDevice {
       lastSeen: DateTime.now().millisecondsSinceEpoch,
       address: "Demo Address",
       bondState: "Demo BondState",
-      totalTargetFile: 5,
+      totalFiles: 5,
       requestId: null,
     );
   }
@@ -130,7 +130,7 @@ class TargetDevice extends CoreDevice {
     int? lastSeen,
     String? address,
     String? bondState,
-    int? totalTargetFile,
+    int? totalFiles,
     int? requestId,
   }) {
     return TargetDevice(
@@ -141,7 +141,7 @@ class TargetDevice extends CoreDevice {
       lastSeen: lastSeen ?? this.lastSeen,
       address: address ?? this.address,
       bondState: bondState ?? this.bondState,
-      totalTargetFile: totalTargetFile ?? this.totalTargetFile,
+      totalFiles: totalFiles ?? this.totalFiles,
       requestId: requestId ?? this.requestId,
     );
   }

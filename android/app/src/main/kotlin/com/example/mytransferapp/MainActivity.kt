@@ -315,6 +315,8 @@ class MainActivity : FlutterActivity() {
 
                     val mode = if (sendMode == "PARALLEL") SendMode.PARALLEL else SendMode.SEQUENTIAL
 
+                    Log.d(TAG, "requestSendFileToMultiple called: devices=$devices, files=$listFilePath, mode=$mode")
+
                     TransferEngine.requestSendFileToMultiple(
                         context = applicationContext,
                         devices = devices,
@@ -340,7 +342,15 @@ class MainActivity : FlutterActivity() {
                                     }
                                 )
                             }
-                            result.success(output)
+                            // ✅ FIX: result.success() PHẢI được gọi trên main thread.
+                            // onAllDone hiện tại được gọi từ Dispatchers.IO -> chuyển về Main.
+                            mainScope.launch {
+                                try {
+                                    result.success(output)
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "Lỗi trả kết quả requestSendFileToMultiple", e)
+                                }
+                            }
                         }
                     )
                 }
@@ -368,6 +378,7 @@ class MainActivity : FlutterActivity() {
                         result.error("INVALID_ARGS", "requestId is required", null)
                         return@setMethodCallHandler
                     }
+                    Log.d(TAG, "MethodChannel acceptRequest: requestId=$requestId")
                     TransferEngine.acceptRequest(requestId)
                     result.success(null)
                 }
@@ -378,6 +389,7 @@ class MainActivity : FlutterActivity() {
                         result.error("INVALID_ARGS", "requestId is required", null)
                         return@setMethodCallHandler
                     }
+                    Log.d(TAG, "MethodChannel cancelRequest: requestId=$requestId")
                     TransferEngine.cancelRequest(requestId)
                     result.success(null)
                 }
@@ -445,6 +457,7 @@ class MainActivity : FlutterActivity() {
                                 "error" to (state.error ?: "")
                             )
                         }
+                        Log.d(TAG, "CH_TRANSFER emit: ${list.size} item(s) -> $list")
                         sink.success(list)
                     }
                 }
@@ -513,17 +526,17 @@ class MainActivity : FlutterActivity() {
                 incomingRequestSink = sink
                 mainScope.launch {
                     TransferEngine.incomingConnectionRequest.collect { device ->
-                        sink.success(
-                            mapOf(
-                                "name" to device.name,
-                                "ipAddress" to device.ipAddress,
-                                "port" to device.port,
-                                "lastSeen" to device.lastSeen,
-                                "fromIndex" to ScanMode.entries.indexOf(device.from),
-                                "totalFiles" to device.totalFiles,
-                                "requestId" to device.requestId
-                            )
+                        val map = mapOf(
+                            "name" to device.name,
+                            "ipAddress" to device.ipAddress,
+                            "port" to device.port,
+                            "lastSeen" to device.lastSeen,
+                            "fromIndex" to ScanMode.entries.indexOf(device.from),
+                            "totalFiles" to device.totalFiles,
+                            "requestId" to device.requestId
                         )
+                        Log.d(TAG, "CH_INCOMING_REQUEST emit: $map")
+                        sink.success(map)
                     }
                 }
             }

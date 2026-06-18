@@ -9,30 +9,44 @@ class WTransferProgressSheet extends StatefulWidget {
   const WTransferProgressSheet({super.key, required this.transferStream});
 
   @override
-  State<WTransferProgressSheet> createState() => _WTransferProgressSheetState();
+  State<WTransferProgressSheet> createState() =>
+      _WTransferProgressSheetState();
 }
 
 class _WTransferProgressSheetState extends State<WTransferProgressSheet> {
   late StreamSubscription<List<TransferState>> _sub;
   List<TransferState> _transfers = [];
   bool _everHadData = false;
+  bool _closeScheduled = false;
 
   @override
   void initState() {
     super.initState();
-    _sub = widget.transferStream.listen((data) {
-      if (!mounted) return;
-      setState(() => _transfers = data);
-
-      if (data.isNotEmpty) _everHadData = true;
-
-      // Tất cả transfer đã biến mất (xong hoặc fail) -> tự đóng sheet
-      if (_everHadData && data.isEmpty) {
-        Future.delayed(const Duration(milliseconds: 800), () {
-          if (mounted) Navigator.of(context).pop();
-        });
-      }
+    _sub = widget.transferStream.listen(_onData, onError: (e) {
+      debugPrint('WTransferProgressSheet stream error: $e');
     });
+  }
+
+  void _onData(List<TransferState> data) {
+    if (!mounted) return;
+
+    debugPrint('WTransferProgressSheet received ${data.length} transfer(s): '
+        '${data.map((e) => e.toString()).join(' | ')}');
+
+    setState(() => _transfers = data);
+
+    if (data.isNotEmpty) _everHadData = true;
+
+    final allFinished =
+        data.isNotEmpty && data.every((t) => t.status.isFinished);
+    final emptyAfterData = _everHadData && data.isEmpty;
+
+    if ((allFinished || emptyAfterData) && !_closeScheduled) {
+      _closeScheduled = true;
+      Future.delayed(const Duration(milliseconds: 1000), () {
+        if (mounted) Navigator.of(context).pop();
+      });
+    }
   }
 
   @override
@@ -58,7 +72,7 @@ class _WTransferProgressSheetState extends State<WTransferProgressSheet> {
             if (_transfers.isEmpty)
               const Padding(
                 padding: EdgeInsets.symmetric(vertical: 24),
-                child: Center(child: Text('Hoàn tất')),
+                child: Center(child: Text('Đang chuẩn bị...')),
               )
             else
               ..._transfers.map(_buildItem),
@@ -74,10 +88,10 @@ class _WTransferProgressSheetState extends State<WTransferProgressSheet> {
 
     Color statusColor;
     switch (t.status) {
-      case 'SUCCESS':
+      case TransferStatus.success:
         statusColor = Colors.green;
         break;
-      case 'FAILED':
+      case TransferStatus.failed:
         statusColor = Colors.red;
         break;
       default:
@@ -116,12 +130,14 @@ class _WTransferProgressSheetState extends State<WTransferProgressSheet> {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text(_statusText(t), style: TextStyle(fontSize: 12, color: statusColor)),
-              if (t.status == 'TRANSFERRING')
-                Text(
-                  '${t.speedMbps.toStringAsFixed(2)} MB/s',
-                  style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
-                ),
+              Text(
+                _statusText(t),
+                style: TextStyle(fontSize: 12, color: statusColor),
+              ),
+              Text(
+                _bytesText(t),
+                style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+              ),
             ],
           ),
         ],
@@ -139,8 +155,31 @@ class _WTransferProgressSheetState extends State<WTransferProgressSheet> {
         return 'Hoàn tất';
       case TransferStatus.failed:
         return 'Lỗi: ${t.error}';
-      default:
-        return "Idle";
+      case TransferStatus.idle:
+        return 'Đang chờ...';
     }
+  }
+
+  String _bytesText(TransferState t) {
+    if (t.status == TransferStatus.connecting) return '';
+    final transferred = _formatBytes(t.bytesTransferred);
+    final total = _formatBytes(t.totalBytes);
+    if (t.status == TransferStatus.transferring && t.speedMbps > 0) {
+      return '$transferred / $total • ${t.speedMbps.toStringAsFixed(2)} MB/s';
+    }
+    return '$transferred / $total';
+  }
+
+  String _formatBytes(int bytes) {
+    if (bytes <= 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    var value = bytes.toDouble();
+    var unitIndex = 0;
+    while (value >= 1024 && unitIndex < units.length - 1) {
+      value /= 1024;
+      unitIndex++;
+    }
+    final decimals = (value < 10 && unitIndex > 0) ? 2 : 1;
+    return '${value.toStringAsFixed(decimals)} ${units[unitIndex]}';
   }
 }

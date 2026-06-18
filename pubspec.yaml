@@ -49,6 +49,7 @@ dependencies:
   photo_manager: ^3.9.0
   photo_manager_image_provider: ^2.2.0
   custom_sliding_segmented_control: ^1.8.5
+  sensors_plus: ^7.0.0
 
 dev_dependencies:
   flutter_test:
