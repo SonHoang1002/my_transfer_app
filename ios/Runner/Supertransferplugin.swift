@@ -1,245 +1,210 @@
-//
-//  Supertransferplugin.swift
-//  Runner
-//
-//  Created by sonmac on 18/6/26.
-//
-
-// SuperTransferPlugin.swift
-// SuperTransfer — iOS
-//
-// Bridge giữa Flutter (Dart) ↔ TransferEngine (Swift).
-// Tương đương MainActivity.kt (Android) — cùng channel name, cùng API contract.
-//
-// Đăng ký trong AppDelegate.swift:
-//   SuperTransferPlugin.register(with: registrar)
-// hoặc với FlutterPluginRegistrant nếu dùng plugin package.
-
 import Flutter
 import UIKit
+import Combine
+import UserNotifications
 import CoreBluetooth
 
-// MARK: - SuperTransferPlugin
-
+@available(iOS 14, *)
+@MainActor
 final class SuperTransferPlugin: NSObject, FlutterPlugin {
 
-    // ── Channel names — PHẢI khớp chính xác với Android ─────────────────────
-    static let chMethod       = "com.supertransfer/method"
-    static let chTransfer     = "com.supertransfer/event.transfer"
-    static let chWifiDevices  = "com.supertransfer/event.wifi_devices"
-    static let chBtDevices    = "com.supertransfer/event.bt_devices"
-    static let chIncoming     = "com.supertransfer/event.incoming_request"
+    static let chMethod      = "com.supertransfer/method"
+    static let chTransfer    = "com.supertransfer/event.transfer"
+    static let chWifiDevices = "com.supertransfer/event.wifi_devices"
+    static let chBtDevices   = "com.supertransfer/event.bt_devices"
+    static let chIncoming    = "com.supertransfer/event.incoming_request"
 
     private let engine = TransferEngine.shared
-
-    // Event sinks
-    private var transferSink:      FlutterEventSink?
-    private var wifiDevicesSink:   FlutterEventSink?
-    private var btDevicesSink:     FlutterEventSink?
-    private var incomingReqSink:   FlutterEventSink?
-
-    // Combine subscriptions
     private var cancellables = Set<AnyCancellable>()
 
-    // ── Registration ──────────────────────────────────────────────────────────
+    private var transferSink:    FlutterEventSink?
+    private var wifiDevicesSink: FlutterEventSink?
+    private var btDevicesSink:   FlutterEventSink?
+    private var incomingReqSink: FlutterEventSink?
 
     static func register(with registrar: FlutterPluginRegistrar) {
-        let instance = SuperTransferPlugin()
+        let instance  = SuperTransferPlugin()
         let messenger = registrar.messenger()
 
-        // MethodChannel
-        let methodChannel = FlutterMethodChannel(name: chMethod, binaryMessenger: messenger)
-        registrar.addMethodCallDelegate(instance, channel: methodChannel)
+        FlutterMethodChannel(name: chMethod, binaryMessenger: messenger)
+            .setMethodCallHandler(instance.handle(_:result:))
 
-        // EventChannels
-        FlutterEventChannel(name: chTransfer,    binaryMessenger: messenger)
-            .setStreamHandler(instance.makeTransferStreamHandler())
+        FlutterEventChannel(name: chTransfer, binaryMessenger: messenger)
+            .setStreamHandler(instance.makeTransferHandler())
         FlutterEventChannel(name: chWifiDevices, binaryMessenger: messenger)
-            .setStreamHandler(instance.makeWifiDevicesStreamHandler())
-        FlutterEventChannel(name: chBtDevices,   binaryMessenger: messenger)
-            .setStreamHandler(instance.makeBtDevicesStreamHandler())
-        FlutterEventChannel(name: chIncoming,    binaryMessenger: messenger)
-            .setStreamHandler(instance.makeIncomingRequestStreamHandler())
+            .setStreamHandler(instance.makeWifiDevicesHandler())
+        FlutterEventChannel(name: chBtDevices, binaryMessenger: messenger)
+            .setStreamHandler(instance.makeBtDevicesHandler())
+        FlutterEventChannel(name: chIncoming, binaryMessenger: messenger)
+            .setStreamHandler(instance.makeIncomingRequestHandler())
 
-        // Tự động khởi động server khi plugin load (giống onCreate Android)
         instance.startServices()
     }
 
-    // ── Start/Stop services ───────────────────────────────────────────────────
-
     private func startServices() {
         Task { @MainActor in
-            engine.startTcpServer { title, body in
-                // Notification — dùng UNUserNotificationCenter
-                SuperTransferPlugin.showLocalNotification(title: title, body: body)
+            if #available(iOS 14.0, *) {
+                engine.startTcpServer { title, body in
+                    SuperTransferPlugin.showLocalNotification(title: title, body: body)
+                }
+            } else {
+                print("⚠️ startTcpServer requires iOS 14.0+, skipping...")
             }
             engine.startAdvertising()
+            engine.startBluetoothAdvertising()
         }
     }
 
-    // ── MethodChannel handler ─────────────────────────────────────────────────
-
+    // MARK: - MethodChannel
     func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         let args = call.arguments as? [String: Any]
 
         Task { @MainActor in
             switch call.method {
-
-            // ── Device info ────────────────────────────────────────────────
             case "getCurrentDeviceInfo":
                 result([
-                    "ipAddress"      : engine.getLocalIpAddress(),
-                    "deviceName"     : engine.getDeviceName(),
-                    "isWifiConnected": isWifiConnected(),
-                ])
+                    "ipAddress"       : self.engine.getLocalIpAddress(),
+                    "deviceName"      : self.engine.getDeviceName(),
+                    "isWifiConnected" : self.isWifiConnected(),
+                ] as [String: Any])
 
             case "getTransferEngineStatus":
-                result(engine.getTransferEngineStatus())
+                result(self.engine.getTransferEngineStatus())
 
-            // ── Permissions ────────────────────────────────────────────────
             case "checkPermissions":
-                // iOS: quyền được kiểm tra riêng từng loại — trả về true cho compat
                 result(true)
 
             case "requestPermissions":
-                // iOS xử lý permission theo từng API (PHPhotoLibrary, CBCentralManager...)
                 result(true)
 
-            // ── WiFi scan ──────────────────────────────────────────────────
             case "startWifiScan":
-                let timeoutMs = args?["timeoutMs"] as? Int ?? 30000
-                engine.startWifiScanning(timeoutMs: timeoutMs)
+                let ms = args?["timeoutMs"] as? Int ?? 30_000
+                self.engine.startWifiScanning(timeoutMs: ms)
                 result(nil)
 
             case "stopWifiScan":
-                engine.stopWifiScanning()
+                self.engine.stopWifiScanning()
                 result(nil)
 
-            // ── Bluetooth ──────────────────────────────────────────────────
             case "checkBluetoothEnabled":
-                // CoreBluetooth không cho phép kiểm tra trực tiếp — trả về best-effort
-                result(CBCentralManager.authorization != .denied)
+                if #available(iOS 13.1, *) {
+                    result(CBCentralManager.authorization != .denied)
+                } else {
+                    result(true)
+                }
 
             case "requestEnableBluetooth":
-                // iOS không có API bật BT theo lập trình — redirect Settings
                 if let url = URL(string: UIApplication.openSettingsURLString) {
                     UIApplication.shared.open(url)
                 }
                 result(nil)
 
             case "startBluetoothScan":
-                let timeoutMs = args?["timeoutMs"] as? Int ?? 30000
-                engine.startBluetoothScan(timeoutMs: timeoutMs)
+                let ms = args?["timeoutMs"] as? Int ?? 30_000
+                self.engine.startBluetoothScan(timeoutMs: ms)
                 result(nil)
 
             case "stopBluetoothScan":
-                engine.stopBluetoothScan()
+                self.engine.stopBluetoothScan()
                 result(nil)
 
-            // ── Transfer server ────────────────────────────────────────────
             case "startReceiveServer":
-                engine.startTcpServer { title, body in
-                    SuperTransferPlugin.showLocalNotification(title: title, body: body)
+                if #available(iOS 14.0, *) {
+                    self.engine.startTcpServer { title, body in
+                        SuperTransferPlugin.showLocalNotification(title: title, body: body)
+                    }
+                } else {
+                    print("⚠️ startTcpServer requires iOS 14.0+")
                 }
                 result(nil)
 
             case "stopReceiveServer":
-                engine.stopTcpServer()
+                self.engine.stopTcpServer()
                 result(nil)
 
-            // ── Send files ─────────────────────────────────────────────────
             case "requestSendFileToMultiple":
                 guard
-                    let rawDevices  = args?["devices"]      as? [[String: Any]],
-                    let listFilePath = args?["listFilePath"] as? [String]
+                    let rawDevices   = args?["devices"]      as? [[String: Any]],
+                    let listFilePath = args?["listFilePath"]  as? [String],
+                    !rawDevices.isEmpty, !listFilePath.isEmpty
                 else {
                     result(FlutterError(code: "INVALID_ARGS",
-                                        message: "devices và listFilePath là bắt buộc",
+                                        message: "devices và listFilePath bắt buộc",
                                         details: nil))
                     return
                 }
-
                 let modeStr = args?["mode"] as? String ?? "SEQUENTIAL"
                 let mode: SendMode = modeStr == "PARALLEL" ? .parallel : .sequential
-                let senderName = engine.getDeviceName()
-
                 let devices = rawDevices.compactMap { TargetDevice.fromMap($0) }
-                if devices.isEmpty {
+                guard !devices.isEmpty else {
                     result(FlutterError(code: "INVALID_ARGS",
                                         message: "Không parse được danh sách thiết bị",
                                         details: nil))
                     return
                 }
 
-                engine.requestSendFileToMultiple(
-                    devices: devices,
-                    filePaths: listFilePath,
-                    senderName: senderName,
-                    mode: mode,
-                    onAllDone: { allResults in
-                        // Chuyển sang format giống Android để Flutter không cần xử lý khác
-                        let output = devices.compactMap { device -> [String: Any]? in
-                            guard let fileResults = allResults[device.id] else { return nil }
-                            return [
-                                "name"      : device.name,
-                                "ipAddress" : device.ipAddress,
-                                "files"     : fileResults.map { fp, ok in
-                                    ["filePath": fp, "success": ok]
-                                }
-                            ]
-                        }
-                        result(output)
+                self.engine.requestSendFileToMultiple(
+                    devices:    devices,
+                    filePaths:  listFilePath,
+                    senderName: self.engine.getDeviceName(),
+                    mode:       mode
+                ) { allResults in
+                    let output: [[String: Any]] = devices.compactMap { device in
+                        guard let fileResults = allResults[device.id] else { return nil }
+                        return [
+                            "name"      : device.name,
+                            "ipAddress" : device.ipAddress,
+                            "files"     : fileResults.map { fp, ok in
+                                ["filePath": fp, "success": ok] as [String: Any]
+                            },
+                        ]
                     }
-                )
+                    result(output)
+                }
 
-            // ── Accept / Reject request ────────────────────────────────────
             case "acceptRequest":
-                guard let requestId = (args?["requestId"] as? NSNumber)?.int64Value else {
-                    result(FlutterError(code: "INVALID_ARGS", message: "requestId bắt buộc", details: nil))
+                guard let rid = (args?["requestId"] as? NSNumber)?.int64Value else {
+                    result(FlutterError(code: "INVALID_ARGS",
+                                        message: "requestId bắt buộc", details: nil))
                     return
                 }
-                engine.acceptRequest(requestId)
+                self.engine.acceptRequest(rid)
                 result(nil)
 
             case "cancelRequest":
-                guard let requestId = (args?["requestId"] as? NSNumber)?.int64Value else {
-                    result(FlutterError(code: "INVALID_ARGS", message: "requestId bắt buộc", details: nil))
+                guard let rid = (args?["requestId"] as? NSNumber)?.int64Value else {
+                    result(FlutterError(code: "INVALID_ARGS",
+                                        message: "requestId bắt buộc", details: nil))
                     return
                 }
-                engine.cancelRequest(requestId)
+                self.engine.cancelRequest(rid)
                 result(nil)
 
-            // ── Cancel transfer ────────────────────────────────────────────
             case "cancelTransfer":
-                let transferId = (args?["transferId"] as? NSNumber)?.int64Value
-                engine.cancelActiveTransfer(transferId)
+                let tid = (args?["transferId"] as? NSNumber)?.int64Value
+                self.engine.cancelActiveTransfer(tid)
                 result(nil)
 
-            // ── Utility ────────────────────────────────────────────────────
             case "openFile":
-                guard let filePath = args?["filePath"] as? String else {
-                    result(FlutterError(code: "INVALID_ARGS", message: "filePath bắt buộc", details: nil))
+                guard let path = args?["filePath"] as? String else {
+                    result(FlutterError(code: "INVALID_ARGS",
+                                        message: "filePath bắt buộc", details: nil))
                     return
                 }
-                openFile(path: filePath)
+                self.openFile(path: path)
                 result(nil)
 
-            case "openWifiSettings":
+            case "openWifiSettings", "openHotspotSettings":
                 if let url = URL(string: UIApplication.openSettingsURLString) {
                     UIApplication.shared.open(url)
                 }
                 result(nil)
 
             case "openBluetoothSettings":
-                if let url = URL(string: "App-Prefs:root=Bluetooth") {
+                let urlStr = "App-Prefs:root=Bluetooth"
+                if let url = URL(string: urlStr), UIApplication.shared.canOpenURL(url) {
                     UIApplication.shared.open(url)
                 } else if let url = URL(string: UIApplication.openSettingsURLString) {
-                    UIApplication.shared.open(url)
-                }
-                result(nil)
-
-            case "openHotspotSettings":
-                if let url = URL(string: UIApplication.openSettingsURLString) {
                     UIApplication.shared.open(url)
                 }
                 result(nil)
@@ -250,36 +215,47 @@ final class SuperTransferPlugin: NSObject, FlutterPlugin {
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // MARK: - EventChannel StreamHandlers
-    // ─────────────────────────────────────────────────────────────────────────
+    // MARK: - EventChannel stream handlers
 
-    // Transfers — phát list mỗi khi transfers Map thay đổi
-    private func makeTransferStreamHandler() -> FlutterStreamHandler {
-        makeHandler(
+    private func makeTransferHandler() -> BlockStreamHandler {
+        BlockStreamHandler(
             onListen: { [weak self] sink in
-                self?.transferSink = sink
-                // Phát ngay giá trị hiện tại
-                let current = (self?.engine.transfers.values.map { $0.toMap() }) ?? []
+                guard let self else { return }
+
+                self.transferSink = sink
+
+                let current = Array(
+                    self.engine.transfers.values.map { $0.toMap() }
+                )
+
                 sink(current)
-                // Subscribe Combine publisher
-                self?.engine.$transfers
+
+                let cancellable = self.engine.$transfers
                     .receive(on: DispatchQueue.main)
                     .sink { [weak self] map in
-                        self?.transferSink?(Array(map.values.map { $0.toMap() }))
+                        let list = Array(
+                            map.values.map { $0.toMap() }
+                        )
+
+                        self?.transferSink?(list)
                     }
-                    .store(in: &(self!.cancellables))
+
+                cancellable.store(in: &self.cancellables)
             },
-            onCancel: { [weak self] in self?.transferSink = nil }
+            onCancel: { [weak self] in
+                self?.transferSink = nil
+            }
         )
     }
 
-    // WiFi devices
-    private func makeWifiDevicesStreamHandler() -> FlutterStreamHandler {
-        makeHandler(
+    private func makeWifiDevicesHandler() -> BlockStreamHandler {
+        BlockStreamHandler(
             onListen: { [weak self] sink in
-                self?.wifiDevicesSink = sink
-                self?.engine.$discoveredDevices
+                guard let self else { return }
+                self.wifiDevicesSink = sink
+                
+                // ✅ FIX: Tạo cancellable riêng
+                let cancellable = self.engine.$discoveredDevices
                     .receive(on: DispatchQueue.main)
                     .sink { [weak self] devices in
                         let list = devices
@@ -287,110 +263,116 @@ final class SuperTransferPlugin: NSObject, FlutterPlugin {
                             .map { $0.toMap() }
                         self?.wifiDevicesSink?(list)
                     }
-                    .store(in: &(self!.cancellables))
+                cancellable.store(in: &self.cancellables)
             },
-            onCancel: { [weak self] in self?.wifiDevicesSink = nil }
+            onCancel: { [weak self] in
+                self?.wifiDevicesSink = nil
+            }
         )
     }
 
-    // BT devices — emit từng device (giống Android push từng device qua btReceiver)
-    private func makeBtDevicesStreamHandler() -> FlutterStreamHandler {
-        makeHandler(
+    private func makeBtDevicesHandler() -> BlockStreamHandler {
+        BlockStreamHandler(
             onListen: { [weak self] sink in
-                self?.btDevicesSink = sink
-                self?.engine.$discoveredDevices
+                guard let self else { return }
+                self.btDevicesSink = sink
+                
+                // ✅ FIX: Tạo cancellable riêng
+                let cancellable = self.engine.$discoveredDevices
                     .receive(on: DispatchQueue.main)
                     .sink { [weak self] devices in
                         devices.filter { $0.from == .bluetooth }
                             .forEach { self?.btDevicesSink?($0.toMap()) }
                     }
-                    .store(in: &(self!.cancellables))
+                cancellable.store(in: &self.cancellables)
             },
-            onCancel: { [weak self] in self?.btDevicesSink = nil }
+            onCancel: { [weak self] in
+                self?.btDevicesSink = nil
+            }
         )
     }
 
-    // Incoming request — emit từng request
-    private func makeIncomingRequestStreamHandler() -> FlutterStreamHandler {
-        makeHandler(
+    private func makeIncomingRequestHandler() -> BlockStreamHandler {
+        BlockStreamHandler(
             onListen: { [weak self] sink in
-                self?.incomingReqSink = sink
-                self?.engine.incomingRequestSubject
+                guard let self else { return }
+                self.incomingReqSink = sink
+                
+                // ✅ FIX: Tạo cancellable riêng
+                let cancellable = self.engine.incomingRequestSubject
                     .receive(on: DispatchQueue.main)
                     .sink { [weak self] device in
                         self?.incomingReqSink?(device.toMap())
                     }
-                    .store(in: &(self!.cancellables))
+                cancellable.store(in: &self.cancellables)
             },
-            onCancel: { [weak self] in self?.incomingReqSink = nil }
+            onCancel: { [weak self] in
+                self?.incomingReqSink = nil
+            }
         )
     }
 
-    /// Factory helper để tránh boilerplate tạo FlutterStreamHandler
-    private func makeHandler(
-        onListen: @escaping (FlutterEventSink) -> Void,
-        onCancel: @escaping () -> Void
-    ) -> FlutterStreamHandler {
-        let handler = BlockStreamHandler()
-        handler.onListenBlock = onListen
-        handler.onCancelBlock = onCancel
-        return handler
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
     // MARK: - Helpers
-    // ─────────────────────────────────────────────────────────────────────────
 
     private func isWifiConnected() -> Bool {
-        // Dùng Network.framework path monitor — đơn giản check local IP != loopback
         let ip = engine.getLocalIpAddress()
         return ip != "127.0.0.1" && !ip.isEmpty
     }
 
     private func openFile(path: String) {
         let url = URL(fileURLWithPath: path)
-        DispatchQueue.main.async {
-            guard let root = UIApplication.shared.connectedScenes
-                .compactMap({ $0 as? UIWindowScene })
-                .first?.windows
-                .first?.rootViewController
-            else { return }
+        guard let root = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .first?.windows
+            .first?.rootViewController
+        else { return }
 
-            let vc = UIDocumentInteractionController(url: url)
-            vc.presentPreview(animated: true)
-            // Giữ reference để tránh deallocate
-            objc_setAssociatedObject(root, "docInteraction", vc, .OBJC_ASSOCIATION_RETAIN)
+        let vc = UIDocumentInteractionController(url: url)
+        vc.delegate = root as? UIDocumentInteractionControllerDelegate
+        if !vc.presentPreview(animated: true) {
+            vc.presentOptionsMenu(from: .zero, in: root.view, animated: true)
         }
+        objc_setAssociatedObject(root, "docIC_\(path.hashValue)", vc,
+                                 .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
     }
 
     static func showLocalNotification(title: String, body: String) {
-        let content         = UNMutableNotificationContent()
-        content.title       = title
-        content.body        = body
-        content.sound       = .default
-
-        let request = UNNotificationRequest(
-            identifier: UUID().uuidString,
-            content: content,
-            trigger: nil  // deliver immediately
-        )
-        UNUserNotificationCenter.current().add(request)
+        let content       = UNMutableNotificationContent()
+        content.title     = title
+        content.body      = body
+        content.sound     = .default
+        UNUserNotificationCenter.current().add(
+            UNNotificationRequest(identifier: UUID().uuidString,
+                                  content: content, trigger: nil))
     }
 }
 
-// MARK: - BlockStreamHandler (helper)
+// MARK: - BlockStreamHandler
 
 private final class BlockStreamHandler: NSObject, FlutterStreamHandler {
-    var onListenBlock: ((FlutterEventSink) -> Void)?
-    var onCancelBlock: (() -> Void)?
 
-    func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
-        onListenBlock?(events)
+    private let onListenBlock: (@escaping FlutterEventSink) -> Void
+    private let onCancelBlock: () -> Void
+
+    init(
+        onListen: @escaping (@escaping FlutterEventSink) -> Void,
+        onCancel: @escaping () -> Void
+    ) {
+        self.onListenBlock = onListen
+        self.onCancelBlock = onCancel
+        super.init()
+    }
+
+    func onListen(
+        withArguments arguments: Any?,
+        eventSink events: @escaping FlutterEventSink
+    ) -> FlutterError? {
+        onListenBlock(events)
         return nil
     }
 
     func onCancel(withArguments arguments: Any?) -> FlutterError? {
-        onCancelBlock?()
+        onCancelBlock()
         return nil
     }
 }
